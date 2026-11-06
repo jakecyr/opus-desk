@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Ignore an obsolete CI run
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BRANCH" --jq '.object.sha')
+          if [ "$head" = "$TESTED_SHA" ]; then echo "ready=true" >> "$GITHUB_OUTPUT"; fi
+      - uses: googleapis/release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5 # v4
+        id: release
+        if: steps.current.outputs.ready == 'true'
+        with:
+          target-branch: ${{ github.event.repository.default_branch }}
+      - name: Run CI on the bot-created release PR
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          branch=$(jq -r '.headBranchName' <<< "$RELEASE_PR")
+          gh workflow run ci.yml --ref "$branch"
+      - name: Select the draft release for this tested commit
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ -n "$TAG" ]; then
+            test "$RELEASE_SHA" = "$TESTED_SHA"
+          else
+            # Permit retrying artifact publication after Release Please already
+            # created a draft and marked the release PR as tagged.
+            TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
+              jq -r --arg sha "$TESTED_SHA" '[.[] | select(.draft and .target_commitish == $sha)][0].tag_name // empty')
+          fi
+          if [ -n "$TAG" ]; then
+            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        if: steps.publish.outputs.tag != ''
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          pattern: binary-*
+          merge-multiple: true
+          path: release-assets
+      - name: Publish the complete release
+        if: steps.publish.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.publish.outputs.tag }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_TAG_SSH_KEY: ${{ secrets.RELEASE_TAG_SSH_KEY }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(find release-assets -name '*.tar.gz' | wc -l)" -eq 4
+          cp install.sh LICENSE release-assets/
+          cd release-assets
+          sha256sum opus-desk-*.tar.gz > SHA256SUMS
+          gh release upload "$TAG" ./* --clobber
+          key="$RUNNER_TEMP/opus-release-key"
+          known_hosts="$RUNNER_TEMP/opus-known-hosts"
+          trap 'rm -f "$key" "$known_hosts"' EXIT
+          umask 077
+          printf '%s\n' "$RELEASE_TAG_SSH_KEY" > "$key"
+          gh api meta --jq '.ssh_keys[] | "github.com \(.)"' > "$known_hosts"
+          cd ..
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq '.sha')" = "$TESTED_SHA"
+          else
+            git tag "$TAG" "$TESTED_SHA"
+            GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts" \
+              git push "git@github.com:$GITHUB_REPOSITORY.git" "refs/tags/$TAG"
+          fi
+          gh release edit "$TAG" --draft=false --latest
