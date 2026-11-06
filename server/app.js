@@ -4,7 +4,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { localOptions, acceptsHost } from './local.js';
-import { Codex } from './codex.js';
+import { AgentClient } from './agent-host.js';
 import { collectPublication, publishPrepared } from './publications.js';
 import { modelCatalog } from './models.js';
 import {
@@ -16,7 +16,7 @@ import {
 import { loadReviewContext, loadReviewState } from './reviews.js';
 import { reviewDefaults, validateReviewSettings } from './review-policy.js';
 import { externalUse } from './ownership.js';
-import { listClaude, claudeThread, runClaude } from './claude.js';
+import { listClaude, claudeThread } from './claude.js';
 import {
   run,
   githubUrl,
@@ -28,10 +28,16 @@ import {
   configuredProjects,
   statePath,
 } from './core.js';
-export async function startServer({ staticRoot, port, hostname } = {}) {
+export async function startServer({
+  staticRoot,
+  port,
+  hostname,
+  agentRuntime,
+} = {}) {
   ({ port, hostname } = localOptions({ port, hostname }));
   const app = express(),
-    codex = new Codex();
+    codex = new AgentClient(agentRuntime);
+  const runClaude = (options) => codex.runClaude(options);
   const catalog = modelCatalog(codex);
   let detectedUsername = null;
   async function currentUsername() {
@@ -63,6 +69,18 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
   let autoThread = null;
   const recentCompletions = new Map();
   function broadcast(event) {
+    if (event.method === 'preparation/updated') {
+      const task = event.params.task;
+      state.preparations[task.key] = task;
+      void saveState(state);
+      event = { method: 'approvals/updated', params: { key: task.key } };
+      if (
+        ['published', 'pending', 'complete', 'failed'].includes(task.status)
+      ) {
+        void scheduleAuto();
+        if (task.status === 'published') void poll();
+      }
+    }
     if (event.method === 'turn/completed')
       void finishPreparation(event).catch((e) =>
         broadcast({ method: 'approvals/error', params: { error: e.message } }),
@@ -93,6 +111,27 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
     for (const c of clients) c.write(`data: ${JSON.stringify(event)}\n\n`);
   }
   codex.on('event', broadcast);
+  codex.on('snapshot', (snapshot) => {
+    for (const task of Object.values(snapshot.tasks)) {
+      const local = state.preparations[task.key];
+      if (
+        !local ||
+        ['running', 'collecting', 'publishing'].includes(local.status)
+      )
+        state.preparations[task.key] = task;
+      if (task.id.startsWith('claude:') && snapshot.active.includes(task.id))
+        pendingClaude.set(task.id, {
+          id: task.id,
+          cwd: task.cwd,
+          agent: 'claude',
+          preview: 'Background ' + task.kind,
+          prompt: 'Background ' + task.kind,
+          updatedAt: task.startedAt / 1000,
+          status: { type: 'active' },
+        });
+    }
+    void saveState(state);
+  });
   app.use((req, res, next) => {
     if (!acceptsHost(req.headers.host, hostname, port))
       return res.status(403).send('Local access only');
@@ -663,6 +702,11 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
         ]
           .filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)
           .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      result.data = result.data.map((session) =>
+        codex.active.has(session.id)
+          ? { ...session, status: { type: 'active', activeFlags: [] } }
+          : session,
+      );
       res.json(result);
     }),
   );
@@ -787,7 +831,7 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
       if (draft) {
         if (draft.agent === 'claude') {
           const uuid = randomUUID();
-          id = runClaude(
+          id = await runClaude(
             {
               id: uuid,
               cwd: draft.cwd,
@@ -844,7 +888,7 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
           throw Error(
             'Another Claude terminal is open in this project. Close it before sending.',
           );
-        runClaude(
+        await runClaude(
           {
             id: id.slice(7),
             cwd: thread.cwd,
@@ -904,11 +948,23 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
   app.post(
     '/api/requests/:id',
     wrap(async (req, res) => {
-      codex.respond(req.params.id, req.body.result);
+      await codex.respond(req.params.id, req.body.result);
       res.json({ ok: true });
     }),
   );
+  const startingJobs = new Set();
   async function startJob(input) {
+    const url = canonicalGithubUrl(input.url);
+    if (startingJobs.has(url))
+      throw Error('A workflow is already starting for this item.');
+    startingJobs.add(url);
+    try {
+      return await launchJob(input);
+    } finally {
+      startingJobs.delete(url);
+    }
+  }
+  async function launchJob(input) {
     const { kind, outcome, forceNew, isolated, auto } = input,
       url = canonicalGithubUrl(input.url),
       target = githubUrl(url);
@@ -923,6 +979,24 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
       (target.kind === 'issues')
     )
       throw Error('URL does not match the selected workflow');
+    const pushOnCompletion = input.pushOnCompletion === true;
+    if (pushOnCompletion && (kind !== 'ci' || auto))
+      throw Error('Automatic push is only available for manual CI fixes');
+    const busyTask = Object.values(state.preparations).find(
+      (task) =>
+        task.url === url &&
+        ['running', 'collecting', 'publishing'].includes(task.status),
+    );
+    if (busyTask) {
+      if (
+        busyTask.kind === kind &&
+        !!busyTask.pushOnCompletion === pushOnCompletion
+      )
+        return { id: busyTask.id };
+      throw Error(
+        'This PR already has a running workflow. Wait for it to finish before starting another.',
+      );
+    }
     const ps = await configuredProjects(state.settings),
       project = ps.find(
         (p) =>
@@ -1007,6 +1081,16 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
         cwd = project.path;
       }
     }
+    const checkoutBusy = Object.values(state.preparations).some(
+      (task) =>
+        task.cwd === cwd &&
+        ['running', 'collecting', 'publishing'].includes(task.status),
+    );
+    const checkoutDirty =
+      target.kind === 'pull' &&
+      !!(await run('git', ['-C', cwd, 'status', '--porcelain'])).trim();
+    const needsIsolation = checkoutBusy || checkoutDirty;
+    if (needsIsolation) id = null;
     if (id) {
       const guard = await externalUse({ cwd, agent });
       if (!guard.available)
@@ -1025,7 +1109,11 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
       (kind === 'issue' || kind === 'describe')
     )
       await rememberWorktree(project.path, isolated);
-    if (isolated)
+    if (
+      isolated ||
+      (!id &&
+        (needsIsolation || (target.kind === 'pull' && isolated !== false)))
+    )
       cwd = await prepareWorktree(project.path, kind + '-' + target.number);
     const taskId = randomUUID(),
       artifactDir = path.join(path.dirname(statePath), 'prepared', taskId);
@@ -1046,6 +1134,7 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
       preferences: state.settings.reviewPreferences,
       issueContext,
       artifact,
+      pushOnCompletion,
     });
     async function register(threadId) {
       state.preparations[taskId] = {
@@ -1060,8 +1149,11 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
         status: 'running',
         startedAt: Date.now(),
         auto: !!auto,
+        pushOnCompletion,
+        background: true,
       };
       await saveState(state);
+      await codex.call('host/register', state.preparations[taskId]);
     }
     if (auto && !state.autoEnabled) throw Error('Auto mode was turned off');
     if (agent === 'claude') {
@@ -1069,10 +1161,15 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
         uuid = id?.startsWith('claude:') ? id.slice(7) : randomUUID();
       id = 'claude:' + uuid;
       await register(id);
-      runClaude(
-        { id: uuid, cwd, prompt, model, effort, permission, resume },
-        broadcast,
-      );
+      try {
+        await runClaude(
+          { id: uuid, cwd, prompt, model, effort, permission, resume },
+          broadcast,
+        );
+      } catch (error) {
+        await broadcastLaunchFailure(taskId, error);
+        throw error;
+      }
       state.sessionOptions ??= {};
       state.sessionOptions[id] = { model, effort, permission };
     } else {
@@ -1097,9 +1194,7 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
           effort: effort || null,
         });
       } catch (e) {
-        state.preparations[taskId].status = 'failed';
-        state.preparations[taskId].error = e.message;
-        await saveState(state);
+        await broadcastLaunchFailure(taskId, e);
         throw e;
       }
     }
@@ -1107,6 +1202,13 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
     await saveState(state);
     broadcast({ method: 'approvals/updated', params: {} });
     return { id };
+  }
+  async function broadcastLaunchFailure(taskId, error) {
+    const task = state.preparations[taskId];
+    task.status = 'failed';
+    task.error = error.message;
+    await codex.call('host/register', task);
+    await saveState(state);
   }
   app.post(
     '/api/job',
@@ -1202,6 +1304,7 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
       (t) => t.id === event.params?.threadId && t.status === 'running',
     );
     if (!task) return;
+    if (task.background) return;
     task.status = 'collecting';
     await saveState(state);
     if (
@@ -1214,6 +1317,20 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
     } else
       try {
         Object.assign(task, await collectPublication(task));
+        if (
+          task.kind === 'ci' &&
+          task.pushOnCompletion &&
+          !task.auto &&
+          task.status === 'pending'
+        ) {
+          task.status = 'publishing';
+          await saveState(state);
+          const result = await publishPrepared({ ...task, status: 'pending' });
+          task.status = 'published';
+          task.publishedAt = Date.now();
+          task.publishedUrl = result.url;
+          void poll();
+        }
       } catch (e) {
         task.status = 'failed';
         task.error = e.message;
@@ -1360,12 +1477,15 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
   app.use((err, req, res, _next) =>
     res.status(500).json({ error: err.message }),
   );
+  if (Object.values(state.preparations).some((task) => task.background))
+    await codex.start();
   const server = app.listen(port, '127.0.0.1');
   await new Promise((resolve, reject) => {
     server.once('listening', resolve);
     server.once('error', reject);
   });
   for (const task of Object.values(state.preparations)) {
+    if (task.background) continue;
     if (['running', 'collecting'].includes(task.status)) {
       task.status = 'failed';
       task.error =
@@ -1385,7 +1505,7 @@ export async function startServer({ staticRoot, port, hostname } = {}) {
     closing = true;
     clearInterval(timer);
     for (const client of clients) client.end();
-    codex.proc?.kill('SIGTERM');
+    codex.disconnect();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();
   }

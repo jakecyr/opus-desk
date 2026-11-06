@@ -62,7 +62,7 @@ test('manual and Auto reviews require approval and use full context', async (t) 
   await fs.writeFile(
     path.join(bin, 'gh'),
     `#!/usr/bin/env node
-const fs=require('fs');const a=process.argv.slice(2),f=JSON.parse(fs.readFileSync(process.env.REVIEW_FIXTURE,'utf8'));const pr={url:'https://github.com/a/b/pull/7',number:7,title:'PR intent',body:'Fixes #5',headRefOid:f.head,closingIssuesReferences:[{url:'https://github.com/a/b/issues/5'}]};let result;
+const fs=require('fs');const a=process.argv.slice(2),f=JSON.parse(fs.readFileSync(process.env.REVIEW_FIXTURE,'utf8'));const pr={url:'https://github.com/a/b/pull/7',number:7,title:'PR intent',body:'Fixes #5',headRefOid:f.head,closingIssuesReferences:[{url:'https://github.com/a/b/issues/5'}],headRefName:'fix-ci',headRepository:{name:'fork'},headRepositoryOwner:{login:'contributor'}};let result;
 if(a.includes('--method')){fs.appendFileSync(process.env.REVIEW_WRITES,JSON.stringify(a)+'\\n');console.log('{}');process.exit(0)}
 if(a[0]==='issue'&&a[1]==='comment'){fs.appendFileSync(process.env.REVIEW_WRITES,fs.readFileSync(a.at(-1),'utf8'));console.log('{}');process.exit(0)}
 if(a[0]==='--version'){console.log('gh test');process.exit(0)}
@@ -78,7 +78,14 @@ console.log(JSON.stringify(result));
   await fs.writeFile(
     path.join(bin, 'codex'),
     `#!/usr/bin/env node
-const fs=require('fs'),rl=require('readline').createInterface({input:process.stdin});let count=0;if(process.argv[2]==='--version'){console.log('codex test');process.exit(0)}rl.on('line',line=>{const m=JSON.parse(line);if(!m.id)return;let result={};if(m.method==='thread/start')result={thread:{id:'thread-'+(++count)}};if(m.method==='turn/start'){fs.appendFileSync(process.env.REVIEW_PROMPTS,JSON.stringify(m.params.input[0].text)+'\\n');setTimeout(()=>console.log(JSON.stringify({method:'turn/completed',params:{threadId:m.params.threadId,turn:{status:'completed'}}})),20)}console.log(JSON.stringify({id:m.id,result}));});
+const fs=require('fs'),rl=require('readline').createInterface({input:process.stdin});let count=0;const directories=new Map();if(process.argv[2]==='--version'){console.log('codex test');process.exit(0)}rl.on('line',line=>{const m=JSON.parse(line);if(!m.id)return;let result={};fs.appendFileSync(process.env.REVIEW_CALLS,JSON.stringify(m)+'\\n');if(m.method==='thread/start'){const id='thread-'+(++count);directories.set(id,m.params.cwd);result={thread:{id}};}if(m.method==='thread/read')result={thread:{id:m.params.threadId,cwd:directories.get(m.params.threadId)||process.env.REVIEW_PROJECT}};if(m.method==='turn/start'){const cwd=directories.get(m.params.threadId)||process.env.REVIEW_PROJECT;if(m.params.input[0].text.includes('user selected Fix CI')){const cp=require('child_process');cp.execFileSync('/usr/bin/git',['-C',cwd,'merge','--ff-only',JSON.parse(fs.readFileSync(process.env.REVIEW_FIXTURE,'utf8')).head]);fs.appendFileSync(cwd+'/file.txt',' CI fix');require('child_process').execFileSync('/usr/bin/git',['-C',cwd,'-c','user.name=Test','-c','user.email=test@example.com','-c','commit.gpgsign=false','commit','-qam','fix: repair CI']);}fs.appendFileSync(process.env.REVIEW_PROMPTS,JSON.stringify(m.params.input[0].text)+'\\n');setTimeout(()=>console.log(JSON.stringify({method:'turn/completed',params:{threadId:m.params.threadId,turn:{status:'completed'}}})),20)}console.log(JSON.stringify({id:m.id,result}));});
+`,
+    { mode: 0o755 },
+  );
+  await fs.writeFile(
+    path.join(bin, 'git'),
+    `#!/usr/bin/env node
+const fs=require('fs'),a=process.argv.slice(2);if(a.includes('push')){fs.appendFileSync(process.env.REVIEW_PUSHES,JSON.stringify(a)+'\\n');process.exit(0)}const r=require('child_process').spawnSync('/usr/bin/git',a,{stdio:'inherit'});process.exit(r.status??1);
 `,
     { mode: 0o755 },
   );
@@ -96,12 +103,23 @@ const fs=require('fs'),rl=require('readline').createInterface({input:process.std
       PORT: String(port),
       REVIEW_FIXTURE: fixtureFile,
       REVIEW_PROMPTS: promptsFile,
+      REVIEW_PROJECT: project,
+      REVIEW_CALLS: path.join(tmp, 'calls.jsonl'),
+      REVIEW_PUSHES: path.join(tmp, 'pushes.jsonl'),
       REVIEW_WRITES: path.join(tmp, 'writes.log'),
     },
     stdio: 'ignore',
   });
   t.after(async () => {
     child.kill();
+    try {
+      const host = JSON.parse(
+        await fs.readFile(path.join(dataDir, 'agents/host.json'), 'utf8'),
+      );
+      process.kill(-host.pid, 'SIGTERM');
+    } catch {
+      /* No host started. */
+    }
     await Promise.race([once(child, 'exit'), delay(3500)]);
     await fs.rm(tmp, { recursive: true, force: true });
   });
@@ -119,7 +137,25 @@ const fs=require('fs'),rl=require('readline').createInterface({input:process.std
       headers,
       body: JSON.stringify(body),
     });
-    return { status: r.status, body: await r.json() };
+    const result = { status: r.status, body: await r.json() };
+    if (p === '/job' && r.ok) {
+      for (let i = 0; i < 100; i++) {
+        const saved = JSON.parse(
+          await fs.readFile(path.join(dataDir, 'state.json'), 'utf8'),
+        );
+        const tasks = Object.values(saved.preparations || {});
+        if (
+          !tasks.some(
+            (task) =>
+              task.id === result.body.id &&
+              ['running', 'collecting', 'publishing'].includes(task.status),
+          )
+        )
+          break;
+        await delay(20);
+      }
+    }
+    return result;
   };
   const prompts = async () => {
     try {
@@ -265,5 +301,119 @@ const fs=require('fs'),rl=require('readline').createInterface({input:process.std
   assert.match(
     await fs.readFile(path.join(tmp, 'writes.log'), 'utf8'),
     /Thanks, I will check\./,
+  );
+  // Fix CI reuses the existing PR chat and pushes to its fork's exact head branch.
+  fixture.head = execFileSync('git', ['-C', project, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+  }).trim();
+  await updateFixture();
+  const ci = await post('/job', {
+    url: 'https://github.com/a/b/pull/7',
+    kind: 'ci',
+    pushOnCompletion: true,
+  });
+  assert.equal(ci.status, 200);
+  assert.equal(ci.body.id, r.body.id, 'reuse the linked review chat');
+  let ciTask;
+  for (let i = 0; i < 100; i++) {
+    const state = JSON.parse(
+      await fs.readFile(path.join(dataDir, 'state.json'), 'utf8'),
+    );
+    ciTask = Object.values(state.preparations).find(
+      (task) => task.kind === 'ci',
+    );
+    if (ciTask && ['published', 'failed'].includes(ciTask.status)) break;
+    await delay(40);
+  }
+  assert.equal(ciTask?.status, 'published', ciTask?.error);
+  const pushes = (await fs.readFile(path.join(tmp, 'pushes.jsonl'), 'utf8'))
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  assert.equal(pushes.length, 1);
+  assert.deepEqual(pushes[0].slice(2), [
+    'push',
+    'git@github.com:contributor/fork.git',
+    ciTask.head + ':refs/heads/fix-ci',
+  ]);
+  const calls = (await fs.readFile(path.join(tmp, 'calls.jsonl'), 'utf8'))
+    .trim()
+    .split('\n')
+    .map(JSON.parse);
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.method === 'thread/resume' && call.params.threadId === ci.body.id,
+    ),
+  );
+  fixture.head = ciTask.head;
+  await updateFixture();
+  const fresh = await post('/job', {
+    url: 'https://github.com/a/b/pull/7',
+    kind: 'ci',
+    pushOnCompletion: true,
+    forceNew: true,
+  });
+  assert.equal(fresh.status, 200);
+  assert.notEqual(fresh.body.id, ci.body.id);
+  let freshTask;
+  for (let i = 0; i < 100; i++) {
+    const state = JSON.parse(
+      await fs.readFile(path.join(dataDir, 'state.json'), 'utf8'),
+    );
+    freshTask = Object.values(state.preparations).find(
+      (task) => task.id === fresh.body.id,
+    );
+    if (freshTask && ['published', 'failed'].includes(freshTask.status)) break;
+    await delay(40);
+  }
+  assert.equal(freshTask?.status, 'published', freshTask?.error);
+  fixture.head = freshTask.head;
+  await updateFixture();
+  const unrelated = path.join(freshTask.cwd, 'unrelated.txt');
+  await fs.writeFile(unrelated, 'Keep this unfinished work');
+  const cleanRetry = await post('/job', {
+    url: 'https://github.com/a/b/pull/7',
+    kind: 'ci',
+    pushOnCompletion: true,
+  });
+  assert.equal(cleanRetry.status, 200);
+  assert.notEqual(
+    cleanRetry.body.id,
+    fresh.body.id,
+    'dirty linked chats use an isolated checkout',
+  );
+  assert.equal(
+    await fs.readFile(unrelated, 'utf8'),
+    'Keep this unfinished work',
+  );
+  const saved = JSON.parse(
+    await fs.readFile(path.join(dataDir, 'state.json'), 'utf8'),
+  );
+  const cleanTask = Object.values(saved.preparations).find(
+    (task) => task.id === cleanRetry.body.id,
+  );
+  assert.equal(cleanTask.status, 'published', cleanTask.error);
+  assert.notEqual(cleanTask.cwd, freshTask.cwd);
+  assert.equal(
+    (
+      await post('/job', {
+        url: 'https://github.com/a/b/pull/7',
+        kind: 'review',
+        pushOnCompletion: true,
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await post('/job', {
+        url: 'https://github.com/a/b/pull/7',
+        kind: 'ci',
+        pushOnCompletion: true,
+        auto: true,
+      })
+    ).status,
+    400,
   );
 });
