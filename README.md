@@ -40,6 +40,16 @@ opus-desk restart --hostname opus-desk.localhost
 
 Then open **http://opus-desk.localhost:4317**. The server stays on loopback. Most modern browsers resolve `.localhost` names locally; use the IP address if yours does not. A hostname does not remove the port.
 
+The default port is `4317`. To use a different port, specify it when starting or restarting:
+
+```sh
+opus-desk start --port 5000
+# Or, for a foreground run:
+opus-desk run --port 5000
+```
+
+Then open **http://127.0.0.1:5000**. For a source checkout, use `npm start -- --port 5000` instead. You can also set the `PORT` environment variable.
+
 ## Learn more
 
 - [Installation, updates, and troubleshooting](docs/installation.md)
