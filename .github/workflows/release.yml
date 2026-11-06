@@ -41,7 +41,7 @@ jobs:
         run: |
           head=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BRANCH" --jq '.object.sha')
           if [ "$head" = "$TESTED_SHA" ]; then echo "ready=true" >> "$GITHUB_OUTPUT"; fi
-      - uses: googleapis/release-please-action@8b8fd2cc23b2e18957157a9d923d75aa0c6f6ad5 # v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         id: release
         if: steps.current.outputs.ready == 'true'
         with:
