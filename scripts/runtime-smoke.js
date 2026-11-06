@@ -137,6 +137,14 @@ export async function runtimeSmoke(command, prefix = []) {
     );
     assert.match(await cli(['stop']), /Already stopped/);
     process.kill(process.pid, 0);
+  } catch (error) {
+    const log = await fs
+      .readFile(path.join(data, 'daemon.log'), 'utf8')
+      .catch(() => '(daemon log unavailable)');
+    throw new Error(
+      `Runtime smoke failed: ${error.message}\nDaemon log:\n${log}`,
+      { cause: error },
+    );
   } finally {
     try {
       await cli(['stop']);

@@ -4,50 +4,85 @@ import { EventEmitter } from 'node:events';
 import { version } from './version.js';
 
 export class Codex extends EventEmitter {
-  constructor() {
+  constructor({ spawnProcess = spawn } = {}) {
     super();
+    this.spawnProcess = spawnProcess;
     this.next = 1;
     this.pending = new Map();
     this.requests = new Map();
   }
-  async start() {
+  start() {
     if (this.ready) return this.ready;
+    let resolveReady, rejectReady;
     this.ready = new Promise((resolve, reject) => {
-      const p = (this.proc = spawn('codex', ['app-server'], {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    const ready = this.ready;
+    let p;
+    const disconnect = (error) => {
+      if (p && this.proc !== p) return;
+      this.proc = null;
+      this.ready = null;
+      for (const request of this.pending.values()) request.reject(error);
+      this.pending.clear();
+      this.requests.clear();
+      rejectReady(error);
+      if (p && p.exitCode === null && !p.killed) p.kill('SIGTERM');
+      this.emit('event', { method: 'connection/closed' });
+    };
+    try {
+      p = this.proc = this.spawnProcess('codex', ['app-server'], {
         stdio: ['pipe', 'pipe', 'pipe'],
-      }));
-      p.once('error', reject);
+      });
+      p.once('error', disconnect);
+      // A CLI can close its pipe before exiting. Handle EPIPE on the stream
+      // itself so a missing/broken agent cannot crash the dashboard process.
+      p.stdin.on('error', disconnect);
+      p.stdout.on('error', disconnect);
+      p.stderr.on('error', disconnect);
       p.stderr.on('data', () => {});
-      p.on('exit', () => {
-        for (const q of this.pending.values())
-          q.reject(new Error('Codex app-server stopped'));
-        this.pending.clear();
-        this.ready = null;
-        this.emit('event', { method: 'connection/closed' });
-      });
-      createInterface({ input: p.stdout }).on('line', (line) => {
-        try {
-          this.receive(JSON.parse(line));
-        } catch {}
-      });
+      p.once('exit', () => disconnect(new Error('Codex app-server stopped')));
+      createInterface({ input: p.stdout })
+        .on('error', disconnect)
+        .on('line', (line) => {
+          if (this.proc !== p) return;
+          try {
+            this.receive(JSON.parse(line));
+          } catch {}
+        });
       this.call('initialize', {
         clientInfo: { name: 'prquay', title: 'Opus Desk', version },
         capabilities: { experimentalApi: true },
-      }).then(() => {
-        this.write({ method: 'initialized' });
-        resolve();
-      }, reject);
-    });
-    return this.ready;
+      })
+        .then(() => {
+          if (this.proc !== p) return;
+          this.write({ method: 'initialized' });
+          resolveReady();
+        })
+        .catch(disconnect);
+    } catch (error) {
+      disconnect(error);
+    }
+    return ready;
   }
   write(obj) {
-    this.proc.stdin.write(JSON.stringify(obj) + '\n');
+    const input = this.proc?.stdin;
+    if (!input || input.destroyed || input.writableEnded) {
+      throw new Error('Codex app-server is not connected');
+    }
+    input.write(JSON.stringify(obj) + '\n');
   }
   call(method, params = {}) {
     const id = this.next++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.write({ id, method, params });
+      try {
+        this.write({ id, method, params });
+      } catch (error) {
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
   receive(msg) {
