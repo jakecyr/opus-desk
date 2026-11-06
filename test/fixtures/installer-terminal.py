@@ -1,8 +1,10 @@
 """Exercise curl-pipe-style setup with a real controlling terminal, offline."""
 
+import json
 import os
 import pty
 import select
+import signal
 import sys
 import time
 
@@ -10,17 +12,20 @@ pid, terminal = pty.fork()
 if pid == 0:
     os.execvp("bash", ["bash", "-c", 'cat "$FIXTURE_SCRIPT" | bash'])
 
-prompts = [
-    (b"Set up GitHub, install/update your agent, and install Opus Desk? [Y/n]", b"\n"),
-    (b"GitHub hostname [", os.fsencode(os.environ.get("FIXTURE_HOST", "")) + b"\n"),
-    (b"Authenticate GitHub CLI with", os.fsencode(os.environ.get("FIXTURE_AUTH_ANSWER", "y")) + b"\n"),
-    (b"Choice [1]:", b"2\n"),
-    (b"Add Opus Desk to PATH", b"\n"),
-    (b"Parent folder containing your Git repositories", os.fsencode(os.environ["HOME"]) + b"\n"),
-    (b"Start or restart Opus Desk now? [Y/n]", b"n\n"),
-]
+answers = {
+    "Set up GitHub, install missing tools, and install Opus Desk?": [""],
+    "GitHub hostname [": [os.environ.get("FIXTURE_HOST", "")],
+    "Authenticate GitHub CLI with": [os.environ.get("FIXTURE_AUTH_ANSWER", "y")],
+    "Choice [1]:": ["2"],
+    "Add Opus Desk to PATH": [""],
+    "Parent folder containing your Git repositories": [os.environ["HOME"]],
+    "Start or restart Opus Desk now?": ["n"],
+    "Retry ": ["y"],
+    "GitHub access is still incomplete.": ["y"],
+}
+answers.update(json.loads(os.environ.get("FIXTURE_ANSWERS", "{}")))
 output = b""
-answered = set()
+pending = b""
 deadline = time.monotonic() + 20
 try:
     while time.monotonic() < deadline:
@@ -33,14 +38,31 @@ try:
         if not chunk:
             break
         output += chunk
-        for index, (prompt, answer) in enumerate(prompts):
-            if index not in answered and prompt in output:
-                os.write(terminal, answer)
-                answered.add(index)
+        pending += chunk
+        while True:
+            matches = [
+                (pending.find(os.fsencode(prompt)), prompt)
+                for prompt in answers
+                if os.fsencode(prompt) in pending
+            ]
+            if not matches:
+                break
+            offset, prompt = min(matches)
+            pending = pending[offset + len(os.fsencode(prompt)):]
+            choices = answers[prompt]
+            if not choices:
+                raise RuntimeError("No fixture answer left for " + prompt)
+            answer = choices.pop(0)
+            os.write(terminal, b"\x04" if answer is None else os.fsencode(answer) + b"\n")
     else:
-        os.kill(pid, 9)
         raise TimeoutError("Installer did not complete in its terminal")
 finally:
+    # Also reap the subprocess when a prompt expectation or deadline fails.
+    if sys.exc_info()[0]:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     os.close(terminal)
     _, status = os.waitpid(pid, 0)
     sys.stdout.buffer.write(output)
