@@ -23,6 +23,8 @@ npm run dev
 
 Open the Vite URL printed in your terminal. Vite forwards `/api` requests to the local server on port 4317. Stop any detached daemon first with `npm run daemon -- stop`. For production-style source runs, use `npm run daemon -- start` after building.
 
+To use a different backend port during development, set the same `PORT` in both terminals, for example `PORT=5000 npm start` and `PORT=5000 npm run dev`. You can also start the backend with `npm start -- --port 5000`.
+
 ## Project layout
 
 | Path                                        | Purpose                                                            |

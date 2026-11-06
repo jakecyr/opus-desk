@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-const apiOrigin = 'http://127.0.0.1:4317';
+const apiOrigin = `http://127.0.0.1:${process.env.PORT || 4317}`;
 export default defineConfig({
   plugins: [react()],
   server: {

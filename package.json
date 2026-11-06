@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "start": "node server/index.js",
+    "start": "node bin/opus-desk.js run",
     "test": "node --test test/*.test.js",
     "daemon": "node bin/opus-desk.js",
     "cli": "node bin/opus-desk.js",
