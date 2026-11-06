@@ -4,7 +4,7 @@ Bug reports, focused fixes, tests, and documentation improvements are welcome. D
 
 ## Development
 
-Use Node.js 24 (see `.nvmrc`), npm, Git, and Python 3 (for the installer terminal test). Node.js 22.14+ is also tested. GitHub CLI and at least one authenticated coding agent are needed to exercise real integrations; automated tests use isolated fixtures and require no provider credentials.
+Use Node.js 24 (see `.nvmrc`), npm, Git, Python 3 (for the installer terminal tests), and ShellCheck. Node.js 22.14+ is also tested. GitHub CLI and at least one authenticated coding agent are needed to exercise real integrations; automated tests use isolated fixtures and require no provider credentials.
 
 ```sh
 git clone https://github.com/jakecyr/opus-desk.git
@@ -44,10 +44,10 @@ To use a different backend port during development, set the same `PORT` in both 
 npm run check
 npx playwright install chromium
 npm run test:ui
-shellcheck install.sh
+npm run test:installer # focused Bash integration and terminal tests
 ```
 
-`npm run check` runs ESLint, Prettier, Node tests, and the dashboard build. Run `npm run format` to apply formatting. Use `npm run test:coverage` to see coverage. Tests isolate state and replace external CLIs; do not add tests that use personal credentials, make model calls, or mutate real GitHub items.
+`npm run check` runs ESLint, Prettier, Bash syntax validation, ShellCheck, Node tests (including the Bash installer), and the dashboard build. Run `npm run format` to apply formatting. Use `npm run test:coverage` to see JavaScript coverage. Installer tests execute the actual Bash script with mocked dependencies and a Python pseudo-terminal, including curl-pipe input, validation retries, idempotency, download validation/fallback, authentication, and failure handling. These tests run in CI on macOS and Linux with Node 22 and 24, alongside browser tests and binary build/smoke checks for all four release targets. Tests isolate state and replace external CLIs; do not add tests that use personal credentials, make model calls, or mutate real GitHub items.
 
 For runtime or packaging changes, also run:
 

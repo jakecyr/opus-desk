@@ -8,6 +8,8 @@
     "build": "vite build",
     "start": "node bin/opus-desk.js run",
     "test": "node --test test/*.test.js",
+    "test:installer": "node --test test/install.test.js",
+    "check:shell": "bash -n install.sh && shellcheck install.sh",
     "daemon": "node bin/opus-desk.js",
     "cli": "node bin/opus-desk.js",
     "lint": "eslint . --max-warnings=0",
@@ -16,7 +18,7 @@
     "test:coverage": "node --test --experimental-test-coverage test/*.test.js",
     "build:binary": "npm run build && node scripts/build-binary.js",
     "test:binary": "node scripts/smoke-binary.js",
-    "check": "npm run lint && npm run format:check && npm test && npm run build",
+    "check": "npm run lint && npm run format:check && npm run check:shell && npm test && npm run build",
     "test:ui": "playwright test"
   },
   "dependencies": {
