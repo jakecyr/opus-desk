@@ -185,7 +185,7 @@ test('installer verifies a release and configures the selected authenticated age
   const result = await f.run();
   assert.match(result.stdout, /Installed/);
   assert.equal((await fs.stat(f.installed)).mode & 0o777, 0o755);
-  assert.match(await f.calls(), /claude auth status/);
+  assert.doesNotMatch(await f.calls(), /claude auth status/);
   assert.match(await f.calls(), /configure --agent claude/);
   assert.doesNotMatch(await f.calls(), /codex|^start$/m);
 });
@@ -199,17 +199,52 @@ test('installer refuses an invalid checksum without replacing an existing binary
   assert.doesNotMatch(await f.calls(), /gh |native-installer|configure/);
 });
 
-test('installer requires GitHub authentication before installing Opus Desk', async (t) => {
-  const f = await fixture(t, { FIXTURE_AUTH: '0' });
-  await assert.rejects(f.run(), /gh auth login/);
-  await assert.rejects(fs.access(f.installed));
+test('unattended installation skips unavailable tools and authentication', async (t) => {
+  const f = await fixture(t, {
+    FIXTURE_AUTH: '0',
+    FIXTURE_AGENT_AUTH: '0',
+    FIXTURE_GH_MISSING: '1',
+    FIXTURE_AGENT_MISSING: '1',
+    OPUSDESK_START: '1',
+  });
+  await f.run();
+  await fs.access(f.installed);
+  assert.doesNotMatch(await f.calls(), /gh |codex |brew |native-installer/);
+  assert.match(await f.calls(), /^restart$/m);
 });
 
-test('installer identifies missing OAuth scopes and refuses unverifiable tokens', async (t) => {
-  const missing = await fixture(t, { FIXTURE_SCOPES: 'repo' });
-  await assert.rejects(missing.run(), /read:org,workflow/);
-  const fineGrained = await fixture(t, { FIXTURE_SCOPES: '' });
-  await assert.rejects(fineGrained.run(), /Cannot verify OAuth scopes/);
+test('interactive installation can skip all integrations and start the app', async (t) => {
+  const f = await fixture(t, { OPUSDESK_AGENT: '' });
+  await f.interactive({
+    'Configure GitHub hostname?': ['n'],
+    'Configure your projects folder?': ['n'],
+    'Set up GitHub tools and authentication?': ['n'],
+    'Choose and set up a coding agent?': ['n'],
+    'Start or restart Opus Desk now?': ['y'],
+  });
+  await fs.access(f.installed);
+  const calls = await f.calls();
+  assert.doesNotMatch(
+    calls,
+    /gh |codex |claude |configure|brew |native-installer/,
+  );
+  assert.match(calls, /^restart$/m);
+});
+
+test('enterprise users can retain CLI authentication and skip GitHub scope checks', async (t) => {
+  const f = await fixture(t, {
+    FIXTURE_SCOPES: '',
+    FIXTURE_AGENT_AUTH: '0',
+    GH_ENTERPRISE_TOKEN: 'fixture',
+  });
+  await f.interactive({
+    'Check GitHub OAuth scopes and offer refresh?': ['n'],
+    'Check codex login and offer its standard sign-in?': ['n'],
+    'Start or restart Opus Desk now?': ['y'],
+  });
+  const calls = await f.calls();
+  assert.doesNotMatch(calls, /gh api|gh auth refresh|codex login/);
+  assert.match(calls, /^restart$/m);
 });
 
 test('interactive pipe setup installs a missing agent, refreshes scopes, and signs in', async (t) => {
@@ -289,10 +324,7 @@ test('interactive setup accepts a pasted enterprise HTTPS URL and declining sign
 test('invalid confirmations, hosts, agent choices, and folders are re-prompted', async (t) => {
   const f = await fixture(t, { OPUSDESK_AGENT: '' });
   const result = await f.interactive({
-    'Set up GitHub, install missing tools, and install Opus Desk?': [
-      'maybe',
-      'yes',
-    ],
+    'Install Opus Desk?': ['maybe', 'yes'],
     'GitHub hostname [': [
       'ghe.example.com:443',
       'ghe..example.com',
@@ -373,8 +405,10 @@ test('Codex also rejects HTML instead of executing it', async (t) => {
     FIXTURE_AGENT_MISSING: '1',
     FIXTURE_INSTALLER_HTML: '1',
   });
-  await assert.rejects(f.interactive({ 'Retry ': ['n'] }), /Invalid installer/);
-  assert.doesNotMatch(await f.calls(), /native-installer|brew |configure/);
+  const result = await f.interactive({ 'Retry ': ['n'] });
+  assert.match(result.stdout, /Invalid installer/);
+  assert.doesNotMatch(await f.calls(), /native-installer|brew /);
+  await fs.access(f.installed);
 });
 
 test('explicit agent update uses the native installer even when already installed', async (t) => {
@@ -420,12 +454,10 @@ for (const invalid of ['HTML', 'INVALID']) {
       FIXTURE_AGENT_MISSING: '1',
       [`FIXTURE_INSTALLER_${invalid}`]: '1',
     });
-    await assert.rejects(
-      f.interactive({ 'Retry ': ['n'] }),
-      /Invalid installer/,
-    );
-    assert.doesNotMatch(await f.calls(), /native-installer|brew |configure/);
-    await assert.rejects(fs.access(f.installed));
+    const result = await f.interactive({ 'Retry ': ['n'] });
+    assert.match(result.stdout, /Invalid installer/);
+    assert.doesNotMatch(await f.calls(), /native-installer|brew /);
+    await fs.access(f.installed);
   });
 }
 
@@ -456,11 +488,9 @@ test('successful login command still requires a verified authenticated session',
     FIXTURE_AGENT_AUTH: '0',
     FIXTURE_LOGIN_INCOMPLETE: '1',
   });
-  await assert.rejects(
-    f.interactive({ 'Retry ': ['n'] }),
-    /sign-in is still incomplete/,
-  );
-  await assert.rejects(fs.access(f.installed));
+  const result = await f.interactive({ 'Retry ': ['n'] });
+  assert.match(result.stdout, /sign-in is still incomplete/);
+  await fs.access(f.installed);
 });
 
 test('incomplete OAuth refresh can be cancelled without repeatedly forcing login', async (t) => {
@@ -468,10 +498,10 @@ test('incomplete OAuth refresh can be cancelled without repeatedly forcing login
     FIXTURE_SCOPES: 'repo',
     FIXTURE_REFRESH_INCOMPLETE: '1',
   });
-  await assert.rejects(
-    f.interactive({ 'GitHub access is still incomplete.': ['n'] }),
-    /access is still incomplete/,
-  );
+  const result = await f.interactive({
+    'GitHub access is still incomplete.': ['n'],
+  });
+  assert.match(result.stdout, /access is still incomplete/);
   assert.equal((await f.calls()).match(/gh auth refresh/g).length, 1);
 });
 
@@ -480,16 +510,9 @@ test('environment tokens with missing scopes fail without attempting refresh', a
     FIXTURE_SCOPES: 'repo',
     GH_ENTERPRISE_TOKEN: 'fixture',
   });
-  await assert.rejects(f.interactive(), /unset environment tokens first/);
+  const result = await f.interactive();
+  assert.match(result.stdout, /unset environment tokens first/);
   assert.doesNotMatch(await f.calls(), /gh auth refresh/);
-});
-
-test('unattended missing dependencies or agent fail without installing tools', async (t) => {
-  for (const flag of ['FIXTURE_GH_MISSING', 'FIXTURE_AGENT_MISSING']) {
-    const f = await fixture(t, { [flag]: '1' });
-    await assert.rejects(f.run(), /[Mm]issing/);
-    assert.doesNotMatch(await f.calls(), /brew |native-installer|configure/);
-  }
 });
 
 test('unattended validation rejects invalid host, folder, agent, and flags', async (t) => {
@@ -505,7 +528,6 @@ test('unattended validation rejects invalid host, folder, agent, and flags', asy
   ]) {
     const f = await fixture(t, overrides);
     await assert.rejects(f.run());
-    await assert.rejects(fs.access(f.installed));
   }
 });
 
@@ -520,7 +542,7 @@ test('terminal EOF cancels without looping or changing the installation', async 
   const f = await fixture(t);
   await assert.rejects(
     f.interactive({
-      'Set up GitHub, install missing tools, and install Opus Desk?': [null],
+      'Install Opus Desk?': [null],
     }),
     /Terminal input ended/,
   );
