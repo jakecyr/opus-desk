@@ -6,15 +6,13 @@
 curl -fsSL https://github.com/jakecyr/opus-desk/releases/latest/download/install.sh | bash
 ```
 
-The script uses `/dev/tty` for questions, even when piped to Bash. It asks before setup and before starting the daemon. Invalid confirmations, hostnames, agent choices, and project folders are prompted again. Failed downloads, installations, authentication, configuration, and startup steps can be retried without restarting setup; answer `n` at a retry prompt to stop. Downloads also retry transient network errors automatically. Terminal EOF cancels setup.
+The script uses `/dev/tty` for questions, even when piped to Bash. It installs the checksum-verified Opus Desk binary first, then offers optional GitHub, project folder, agent, PATH, and startup steps. Skip any integration to configure it later. If an optional step fails, decline its retry prompt to continue; the installed application remains available. Terminal EOF ends setup.
 
-Working Git and GitHub CLI installations are reused. Homebrew is only needed for missing tools; setup does not run `brew update` or upgrade existing dependencies. Homebrew's own installer may ask for administrator access. Opus Desk itself installs to `~/.local/bin` without sudo. If needed, it offers to add the binary directory to your Bash or Zsh profile, without duplicating an existing entry. Other shells receive a PATH instruction.
+GitHub setup can install missing Git and GitHub CLI tools with Homebrew and offers browser login, OAuth scope checks, and Git credential setup. Each is optional. You can choose a GitHub Enterprise hostname (such as `ghe.example.com`) and change it later with `opus-desk configure --github-host HOST` or in Settings. Fine-grained and enterprise tokens may not expose OAuth scope headers; skip the scope check when your organization manages permissions. Repository permissions and organization SSO still apply.
 
-Choose a GitHub hostname during setup (default `github.com`), or set `OPUSDESK_GITHUB_HOST` for unattended setup. Pasted HTTPS URLs such as `https://ghe.example.com/` are normalized to the hostname; ports and repository paths are rejected. GitHub CLI signs in through its browser flow when you accept the authentication prompt; declining skips sign-in and GitHub features remain unavailable until you authenticate. Change the host later in Settings or with `opus-desk configure --github-host HOST`. OAuth scopes `repo`, `read:org`, `workflow`, and `read:project` cover repository workflows, organization visibility, and agent fixes to GitHub Actions files, and read access to GitHub Projects. Missing scopes prompt `gh auth refresh`. Tokens supplied through `GH_TOKEN`/`GITHUB_TOKEN` or their enterprise equivalents cannot be refreshed interactively; unset them and rerun setup. Fine-grained token permissions cannot be inferred from OAuth scope headers, so the installer asks for a verifiable CLI OAuth login instead of claiming to validate them. Organization SSO, repository access, and protected branch rules still apply.
+You can select Codex or Claude Code and use an existing CLI, optionally install it, or skip agent setup. Login checks and standard sign-in are optional: skip them when your organization uses custom endpoints, credentials, proxies, or another supported provider configuration. Configure those settings in the CLI using your organization's instructions. Opus Desk launches the installed CLI and inherits its environment; start or restart Opus Desk from a shell with any required environment variables set. It does not set endpoint URLs or credentials itself. Your CLI and enterprise endpoint must support the features Opus Desk uses (Codex `app-server` or Claude Code's CLI interface); matching the HTTP API format alone does not guarantee compatibility. An already-running background agent host may need to be stopped before it picks up changed environment variables.
 
-The selected agent is reused if its version command works; existing installations are not updated by default. Set `OPUSDESK_UPDATE_AGENT=1` to explicitly run its official native latest-release installer during interactive setup. Downloads are checked for a shell-script header and valid syntax before execution. If Claude's native download returns HTML or installation fails, macOS setup tries the documented `brew install --cask claude-code` alternative when Homebrew is available. On other systems, setup explains the failure and offers to retry after network access is fixed or the agent is installed separately. Homebrew installations of Claude require manual updates.
-
-The installer checks `codex login status` or `claude auth status`, opens the appropriate login flow if needed, and checks again. Existing authenticated sessions are reused. It never runs a paid test prompt or writes provider credentials itself. An identical verified Opus Desk binary is left in place; a different release is replaced atomically. Project folders must already exist; `~` and `~/...` are accepted at the folder prompt.
+Existing agent installations are not updated by default. Set `OPUSDESK_UPDATE_AGENT=1` for an explicit interactive update. Downloads are checked for a shell-script header and valid syntax before execution. If Claude's native installer fails, macOS setup can use Homebrew. Opus Desk installs to `~/.local/bin` without sudo and can add that directory to your Bash or Zsh profile. Project folders must already exist; `~` and `~/...` are accepted at the prompt. An identical binary is reused; a different release is replaced atomically.
 
 Official setup references, checked November 5, 2026: [Codex](https://learn.chatgpt.com/docs/cli), [Codex authentication](https://learn.chatgpt.com/docs/auth), [Claude Code](https://code.claude.com/docs/en/setup), [Claude CLI authentication](https://code.claude.com/docs/en/cli-reference), [GitHub CLI](https://cli.github.com/manual/gh_auth_login), and [Homebrew](https://brew.sh/).
 
@@ -32,25 +30,25 @@ Supported release targets are macOS arm64/x64 and Linux arm64/x64. Linux binarie
 
 ## Preconfigured or unattended machines
 
-Dependencies and credentials must already work in this mode; it does not install dependencies, update agents, open a login flow, or start the daemon unless requested.
+This mode installs Opus Desk without checking, installing, or authenticating GitHub or agent tools. It does not start the daemon unless requested. Supply optional settings only when you want to change them.
 
 ```sh
-OPUSDESK_NONINTERACTIVE=1 OPUSDESK_AGENT=codex bash install.sh
+OPUSDESK_NONINTERACTIVE=1 bash install.sh
 ```
 
-| Variable                  | Purpose                                                     |
-| ------------------------- | ----------------------------------------------------------- |
-| `OPUSDESK_AGENT`          | `codex` or `claude`                                         |
-| `OPUSDESK_UPDATE_AGENT`   | `1` explicitly reinstalls/updates the agent interactively   |
-| `OPUSDESK_VERSION`        | A stable `vX.Y.Z` tag; default `latest`                     |
-| `OPUSDESK_GITHUB_HOST`    | GitHub hostname; default `github.com`                       |
-| `OPUSDESK_INSTALL_DIR`    | Destination; default `~/.local/bin`                         |
-| `OPUSDESK_PROJECTS_DIR`   | Existing parent folder containing Git repositories          |
-| `OPUSDESK_NONINTERACTIVE` | `1` validates preconfigured dependencies and authentication |
-| `OPUSDESK_START`          | `1` starts the daemon after setup                           |
-| `OPUSDESK_DATA_DIR`       | Overrides the state and log directory                       |
+| Variable                  | Purpose                                                   |
+| ------------------------- | --------------------------------------------------------- |
+| `OPUSDESK_AGENT`          | `codex` or `claude`; optional default agent               |
+| `OPUSDESK_UPDATE_AGENT`   | `1` explicitly reinstalls/updates the agent interactively |
+| `OPUSDESK_VERSION`        | A stable `vX.Y.Z` tag; default `latest`                   |
+| `OPUSDESK_GITHUB_HOST`    | GitHub hostname; default `github.com`                     |
+| `OPUSDESK_INSTALL_DIR`    | Destination; default `~/.local/bin`                       |
+| `OPUSDESK_PROJECTS_DIR`   | Existing parent folder containing Git repositories        |
+| `OPUSDESK_NONINTERACTIVE` | `1` skips prompts and integration setup                   |
+| `OPUSDESK_START`          | `1` starts the daemon after setup                         |
+| `OPUSDESK_DATA_DIR`       | Overrides the state and log directory                     |
 
-The script does not change repository settings or your Git identity. Git uses your existing identity for commits. GitHub's Git credential helper is configured through `gh auth setup-git`.
+The script does not change repository settings or your Git identity. Git uses your existing identity for commits. If you choose Git credential setup, the script runs `gh auth setup-git`.
 
 ## Commands and local URLs
 
