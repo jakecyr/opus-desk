@@ -105,7 +105,7 @@ test('auto mode deduplicates events by PR revision and issue identity', () => {
 });
 
 test('GitHub Enterprise host is validated and used for URLs', async () => {
-  const { setGithubHost, canonicalGithubUrl, run } =
+  const { setGithubHost, canonicalGithubUrl } =
     await import('../server/core.js');
   setGithubHost('git.example.com');
   try {
