@@ -1,1 +1,69 @@
-{"name":"prquay","version":"0.1.0","private":true,"type":"module","scripts":{"dev":"vite --host 127.0.0.1","build":"vite build","start":"node server/index.js","test":"node --test","daemon":"node server/daemon.js"},"dependencies":{"@vitejs/plugin-react":"^5.0.0","express":"^5.1.0","lucide-react":"^0.468.0","react":"^19.0.0","react-dom":"^19.0.0","vite":"^7.0.0"}}
+{
+  "name": "opus-desk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "test": "node --test test/*.test.js",
+    "daemon": "node bin/opus-desk.js",
+    "cli": "node bin/opus-desk.js",
+    "lint": "eslint . --max-warnings=0",
+    "format:check": "prettier --check .",
+    "format": "prettier --write .",
+    "test:coverage": "node --test --experimental-test-coverage test/*.test.js",
+    "build:binary": "npm run build && node scripts/build-binary.js",
+    "test:binary": "node scripts/smoke-binary.js",
+    "check": "npm run lint && npm run format:check && npm test && npm run build",
+    "test:ui": "playwright test"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.65.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.14.0",
+    "postject": "^1.0.0-alpha.6",
+    "prettier": "^3.9.10",
+    "vite": "^7.0.0"
+  },
+  "description": "A local-first dashboard for GitHub pull requests, issues, and Codex/Claude sessions, with background agent workflows.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jakecyr/opus-desk.git"
+  },
+  "homepage": "https://github.com/jakecyr/opus-desk#readme",
+  "bugs": {
+    "url": "https://github.com/jakecyr/opus-desk/issues"
+  },
+  "keywords": [
+    "github",
+    "codex",
+    "claude",
+    "dashboard",
+    "local-first",
+    "developer-tools"
+  ],
+  "engines": {
+    "node": "^22.14.0 || >=24.0.0"
+  },
+  "bin": {
+    "opus-desk": "bin/opus-desk.js"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
+  }
+}

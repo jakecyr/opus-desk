@@ -1,37 +1,51 @@
 # Opus Desk
 
-A local-first dashboard for GitHub work and Codex sessions. Opus Desk runs on your machine and uses your existing `gh` and Codex CLI authentication. It does not run a hosted service or upload your conversation history to a third-party dashboard. GitHub and model-provider requests still go to those services when their CLIs operate.
+[![CI](https://github.com/jakecyr/opus-desk/actions/workflows/ci.yml/badge.svg)](https://github.com/jakecyr/opus-desk/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## Run
+Your local dashboard for GitHub pull requests, issues, and Codex or Claude Code sessions. Pick up conversations, review PRs, and run agent workflows from one place.
 
-Requires Node 20.19+ (or 22.12+), GitHub CLI and Codex CLI. Sign in to each CLI through its normal flow if needed.
+## Get started
+
+On macOS or Linux, run this in your terminal:
 
 ```sh
-npm install
-npm run build
-npm run daemon -- start
+curl -fsSL https://github.com/jakecyr/opus-desk/releases/latest/download/install.sh | bash
 ```
 
-Open http://127.0.0.1:4317. The server binds to loopback only. Set the projects directory in Settings; immediate child folders that are Git repositories are discovered; PR actions require a matching GitHub origin. It polls GitHub through `gh` every two minutes by default. Desktop notifications require browser permission and an open dashboard.
+The interactive installer:
 
-## Current scope
+1. Installs or updates Git and GitHub CLI using Homebrew, and guides GitHub sign-in with the required permissions.
+2. Lets you choose Codex or Claude Code, installs its latest native release, and guides sign-in.
+3. Installs the verified Opus Desk binary, helps configure PATH, asks where your projects live, and offers to start it.
 
-Opus Desk lists open PRs involving you, requests for your review, your authored PRs, assigned issues, and local Codex sessions. It can start and resume Codex sessions, route supported Codex questions and approvals, and launch contextual PR and issue tasks. PR actions require a local checkout. Draft-review creation is requested of the agent and depends on its tool access and GitHub permissions; inspect the agent output and GitHub before relying on it.
+Open **http://127.0.0.1:4317**. No Node.js installation is needed. You need an account with access to your chosen agent; provider usage follows your plan or API billing.
 
-Stop it with `npm run daemon -- stop` and check it with `npm run daemon -- status`. The detached daemon does not start automatically at login.
+Release downloads become available after the first release PR is merged and CI publishes the binaries. Until then, use the [developer setup](CONTRIBUTING.md#development).
 
-Claude Code history and noninteractive turns are supported when its CLI is installed; this has not been tested on a machine with Claude installed. Claude default permission mode is not a sandbox guarantee, and interactive Claude permissions and questions are not supported in this version. Existing Codex Cloud chats, background desktop notifications, automatic worktree cleanup, comprehensive PR classification, and repository-wide issue discovery are not implemented yet. Opus Desk does not delete worktrees automatically. Some Codex questions and approvals may use protocol types this early build does not yet support.
+## Everyday commands
 
-Agent permissions default to full access without approval, matching the requested local CLI aliases; sandbox mode remains selectable. The dangerous mode grants the agent broad local access without prompts. Review the selected mode before launching. Code and issue text are untrusted input to agents. All application state is stored at `~/.local/share/prquay/state.json` with user-only permissions.
+```sh
+opus-desk start
+opus-desk status
+opus-desk stop
+opus-desk restart
+```
 
-## Development
+It keeps running when you close the terminal. To use a friendly local URL:
 
-Run `npm start` in one terminal and `npm run dev` in another (stop the detached daemon first). Run `npm test` and `npm run build` before contributing.
+```sh
+opus-desk restart --hostname opus-desk.localhost
+```
 
-## Worktrees and cleanup
+Then open **http://opus-desk.localhost:4317**. The server stays on loopback. Most modern browsers resolve `.localhost` names locally; use the IP address if yours does not. A hostname does not remove the port.
 
-New sessions and issue jobs can run in a separate Git worktree; the choice is remembered per project. Bulk issue jobs start separate sessions in parallel and default to separate worktrees. Each worktree starts from committed `HEAD` on a new `prquay/` branch. Uncommitted changes in the original checkout are not copied. Worktrees are kept after the work finishes and can be inspected or removed with Git. Selecting the same checkout for parallel sessions can cause conflicting edits.
+## Learn more
 
-Cleanup lists stale open PRs in your GitHub inbox and open issues assigned to you or in locally discovered repositories. The cutoff is based on last update; GitHub searches and access permissions limit what is shown. Closing selected items acts on GitHub after an in-app confirmation. It does not delete branches or worktrees; failures are reported per item.
+- [Installation, updates, and troubleshooting](docs/installation.md)
+- [Features, permissions, and current limitations](docs/usage.md)
+- [Development and contributing](CONTRIBUTING.md)
+- [How reviewed PRs become releases](docs/releases.md)
+- [Security policy](SECURITY.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [MIT license](LICENSE)
 
-The notification inbox is stored in this browser. Desktop notifications and the inbox receive new events while the dashboard is open; they do not collect events while it is closed. Browser site permissions may also need to be enabled.
+Opus Desk uses your existing CLI authentication and stores its state on your machine. Agents currently default to unrestricted local access; select sandbox mode in Settings if needed. Auto mode is off by default. It prepares local commits and draft reviews; publishing is queued for your approval on Focus. Review [permissions and behavior](docs/usage.md) before starting agents.

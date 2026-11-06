@@ -1,0 +1,10 @@
+{
+  "name": "CI creates release tags",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [{ "actor_type": "DeployKey", "bypass_mode": "always" }],
+  "conditions": {
+    "ref_name": { "include": ["~ALL"], "exclude": [] }
+  },
+  "rules": [{ "type": "creation" }]
+}
