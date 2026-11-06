@@ -13,15 +13,11 @@ On macOS or Linux, run this in your terminal:
 curl -fsSL https://github.com/jakecyr/opus-desk/releases/latest/download/install.sh | bash
 ```
 
-The interactive installer:
-
-1. Reuses working Git and GitHub CLI installations, installs missing tools using Homebrew, and offers GitHub sign-in with the required permissions and a custom GitHub Enterprise hostname.
-2. Lets you choose Codex or Claude Code, reuses an existing installation or installs it if needed, and guides sign-in.
-3. Installs the verified Opus Desk binary, helps configure PATH, asks where your projects live, and offers to start it.
+The installer verifies and installs Opus Desk first. You can then choose whether to configure GitHub, install or sign in to a coding agent, add the command to your PATH, and start the app. Each integration can be set up later. Existing enterprise CLI configurations can be used without running the standard sign-in flows.
 
 Run `opus-desk update` to install the latest release, then `opus-desk restart` to update a running daemon. Rerunning the installer also installs the latest release.
 
-Open **http://127.0.0.1:4317**. No Node.js installation is needed. You need an account with access to your chosen agent; provider usage follows your plan or API billing.
+Open **http://127.0.0.1:4317**. No Node.js installation is needed. Agent features require a compatible, configured Codex or Claude Code CLI and access to its provider.
 
 Release downloads become available after the first release PR is merged and CI publishes the binaries. Until then, use the [developer setup](CONTRIBUTING.md#development).
 

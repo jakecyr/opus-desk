@@ -13,7 +13,20 @@ if pid == 0:
     os.execvp("bash", ["bash", "-c", 'cat "$FIXTURE_SCRIPT" | bash'])
 
 answers = {
-    "Set up GitHub, install missing tools, and install Opus Desk?": [""],
+    "Install Opus Desk?": [""],
+    "Configure GitHub hostname?": [""],
+    "Configure your projects folder?": [""],
+    "Set up GitHub tools and authentication?": [""],
+    "Choose and set up a coding agent?": [""],
+    "Install missing GitHub tools": [""],
+    "Configure Git to use GitHub CLI credentials?": [""],
+    "Check GitHub OAuth scopes and offer refresh?": [""],
+    "Refresh GitHub OAuth scopes now?": ["", "", ""],
+    "Install codex using its official installer?": [""],
+    "Install claude using its official installer?": [""],
+    "Check codex login and offer its standard sign-in?": [""],
+    "Check claude login and offer its standard sign-in?": [""],
+    "standard sign-in now?": [""],
     "GitHub hostname [": [os.environ.get("FIXTURE_HOST", "")],
     "Authenticate GitHub CLI with": [os.environ.get("FIXTURE_AUTH_ANSWER", "y")],
     "Choice [1]:": ["2"],

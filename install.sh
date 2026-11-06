@@ -77,24 +77,26 @@ setup_github() {
     fi
   done
   if [[ "${#missing_tools[@]}" != 0 ]]; then
-    [[ "$noninteractive" != 1 ]] || { printf 'Missing or broken tools: %s. Rerun interactively to install them.\n' "${missing_tools[*]}" >&2; exit 1; }
-    ensure_brew
-    retry_step 'GitHub dependencies' install_github_tools "${missing_tools[@]}"
+    [[ "$noninteractive" != 1 ]] || { printf 'Missing or broken tools: %s. Rerun interactively to install them.\n' "${missing_tools[*]}" >&2; return 1; }
+    confirm "Install missing GitHub tools (${missing_tools[*]})?" || return 0
+    ensure_brew || return 1
+    retry_step 'GitHub dependencies' install_github_tools "${missing_tools[@]}" || return 1
   fi
-  command -v gh >/dev/null || { printf 'GitHub CLI is missing. Rerun interactively to install it.\n' >&2; exit 1; }
-  command -v git >/dev/null || { printf 'Git is missing. Rerun interactively to install it.\n' >&2; exit 1; }
+  command -v gh >/dev/null || { printf 'GitHub CLI is missing. Rerun interactively to install it.\n' >&2; return 1; }
+  command -v git >/dev/null || { printf 'Git is missing. Rerun interactively to install it.\n' >&2; return 1; }
   if ! gh auth status --active --hostname "$github_host" >/dev/null 2>&1; then
-    [[ "$noninteractive" != 1 ]] || { printf 'Run gh auth login --hostname %s --scopes repo,read:org,workflow,read:project first.\n' "$github_host" >&2; exit 1; }
+    [[ "$noninteractive" != 1 ]] || { printf 'Run gh auth login --hostname %s --scopes repo,read:org,workflow,read:project first.\n' "$github_host" >&2; return 1; }
     if ! confirm "Authenticate GitHub CLI with ${github_host} now?"; then
       printf 'Skipping GitHub authentication. Run gh auth login --hostname %s when ready.\n' "$github_host"
       return 0
     fi
     printf 'Opus Desk needs repository and organization access; workflow allows agent fixes to CI files.\n'
-    retry_step 'GitHub sign-in' gh auth login --hostname "$github_host" --web --git-protocol https --scopes repo,read:org,workflow,read:project < /dev/tty
+    retry_step 'GitHub sign-in' gh auth login --hostname "$github_host" --web --git-protocol https --scopes repo,read:org,workflow,read:project < /dev/tty || return 1
   fi
+  if confirm 'Check GitHub OAuth scopes and offer refresh?'; then
   local headers scopes missing scope refreshed=0
   while true; do
-    retry_step 'GitHub access check' github_headers
+    retry_step 'GitHub access check' github_headers || return 1
     scopes="$(printf '%s\n' "$headers" | awk 'tolower($0) ~ /^x-oauth-scopes:/ {sub(/^[^:]*:[[:space:]]*/, ""); gsub(/[[:space:]\r]/, ""); print}')"
     missing=''
     for scope in repo read:org workflow read:project; do
@@ -113,16 +115,20 @@ setup_github() {
     fi
     if [[ "$noninteractive" == 1 || -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}${GH_ENTERPRISE_TOKEN:-}${GITHUB_ENTERPRISE_TOKEN:-}" ]]; then
       printf 'Run gh auth refresh --hostname %s --scopes repo,read:org,workflow,read:project (unset environment tokens first).\n' "$github_host" >&2
-      exit 1
+      return 1
     fi
     if [[ "$refreshed" == 1 ]]; then
-      confirm 'GitHub access is still incomplete. Check authorization and retry?' || exit 1
+      confirm 'GitHub access is still incomplete. Check authorization and retry?' || return 1
     fi
-    retry_step 'GitHub scope refresh' gh auth refresh --hostname "$github_host" --scopes repo,read:org,workflow,read:project < /dev/tty
+    confirm 'Refresh GitHub OAuth scopes now?' || return 0
+    retry_step 'GitHub scope refresh' gh auth refresh --hostname "$github_host" --scopes repo,read:org,workflow,read:project < /dev/tty || return 1
     refreshed=1
   done
-  retry_step 'Git credential configuration' gh auth setup-git --hostname "$github_host"
   printf 'GitHub authentication and OAuth scopes verified. Organization SSO and repository roles still apply.\n'
+  fi
+  if confirm 'Configure Git to use GitHub CLI credentials?'; then
+    retry_step 'Git credential configuration' gh auth setup-git --hostname "$github_host" || return 1
+  fi
 }
 
 github_headers() {
@@ -171,13 +177,13 @@ setup_agent() {
     if command -v codex >/dev/null && ! command -v claude >/dev/null; then agent=codex
     elif command -v claude >/dev/null && ! command -v codex >/dev/null; then agent=claude
     elif [[ "$noninteractive" == 1 ]]; then
-      printf 'Set OPUSDESK_AGENT=codex or OPUSDESK_AGENT=claude for unattended setup.\n' >&2; exit 1
+      return 0
     fi
   fi
   while [[ "$agent" != codex && "$agent" != claude ]]; do
     if [[ -n "$agent" || "$noninteractive" == 1 ]]; then
       printf 'OPUSDESK_AGENT must be codex or claude.\n' >&2
-      [[ "$noninteractive" != 1 ]] || exit 1
+      [[ "$noninteractive" != 1 ]] || return 1
     fi
     local choice
     prompt choice $'\nChoose your coding agent:\n  1) Codex (OpenAI)\n  2) Claude Code (Anthropic)\nChoice [1]: '
@@ -186,13 +192,23 @@ setup_agent() {
   if [[ "${OPUSDESK_UPDATE_AGENT:-0}" != 1 ]] && command -v "$agent" >/dev/null && "$agent" --version; then
     printf 'Using existing %s installation.\n' "$agent"
   else
-    [[ "$noninteractive" != 1 ]] || { printf '%s is missing or broken; rerun interactively to install it.\n' "$agent" >&2; exit 1; }
-    retry_step "$agent installation" install_agent
+    [[ "$noninteractive" != 1 ]] || { printf '%s is missing or broken; rerun interactively to install it.\n' "$agent" >&2; return 1; }
+    if confirm "Install ${agent} using its official installer?"; then
+      retry_step "$agent installation" install_agent || return 1
+    else
+      printf 'Skipping agent installation; configure it separately when ready.\n'
+      return 0
+    fi
   fi
-  if ! agent_authenticated; then
-    [[ "$noninteractive" != 1 ]] || { printf 'Run %s first.\n' "$([[ "$agent" == codex ]] && printf 'codex login' || printf 'claude auth login')" >&2; exit 1; }
-    printf 'Complete %s sign-in in your browser. Your plan or API account must permit usage.\n' "$agent"
-    retry_step "$agent sign-in" agent_login
+  printf 'Existing enterprise provider configuration is managed by the agent CLI.\n'
+  if confirm "Check ${agent} login and offer its standard sign-in?"; then
+    if ! agent_authenticated; then
+      if confirm "Run ${agent} standard sign-in now?"; then
+        retry_step "${agent} sign-in" agent_login || return 1
+      else
+        printf 'Skipping sign-in; configure authentication with your provider when ready.\n'
+      fi
+    fi
   fi
 }
 
@@ -299,12 +315,10 @@ main() (
   export PATH="${HOME}/.local/bin:${PATH}:/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin"
   if [[ "$noninteractive" != 1 ]]; then
     if ! ( : < /dev/tty ) 2>/dev/null; then
-      printf 'Interactive setup needs a terminal. For preconfigured machines set OPUSDESK_NONINTERACTIVE=1 and OPUSDESK_AGENT.\n' >&2; return 1
+      printf 'Interactive setup needs a terminal. For unattended installation set OPUSDESK_NONINTERACTIVE=1.\n' >&2; return 1
     fi
-    confirm 'Set up GitHub, install missing tools, and install Opus Desk?' || return 1
+    confirm 'Install Opus Desk?' || return 1
   fi
-  select_github_host
-  select_projects_dir
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   if [[ "$version" == latest ]]; then
@@ -334,9 +348,38 @@ main() (
   if [[ "${actual%% *}" != "$expected" ]]; then
     printf 'Checksum mismatch; refusing to install.\n' >&2; return 1
   fi
-  setup_github
-  setup_agent
   retry_step 'Opus Desk installation' install_release
+  # Optional integrations must never prevent the binary from being installed.
+  if [[ "$noninteractive" != 1 ]]; then
+    if confirm 'Configure GitHub hostname?'; then
+      select_github_host
+    else
+      github_host=''
+    fi
+    if confirm 'Configure your projects folder?'; then
+      select_projects_dir
+    else
+      projects_dir=''
+    fi
+    if confirm 'Set up GitHub tools and authentication?'; then
+      if [[ -z "$github_host" ]]; then
+        (github_host=github.com; setup_github) || printf 'GitHub setup incomplete; continue configuring it later.\n' >&2
+      else
+        setup_github || printf 'GitHub setup incomplete; continue configuring it later.\n' >&2
+      fi
+    fi
+    if confirm 'Choose and set up a coding agent?'; then
+      setup_agent || printf 'Agent setup incomplete; configure it later.\n' >&2
+    fi
+  else
+    [[ -z "${OPUSDESK_GITHUB_HOST:-}" ]] || select_github_host
+    [[ -z "$projects_dir" ]] || select_projects_dir
+    agent="${OPUSDESK_AGENT:-}"
+    if [[ -n "$agent" && "$agent" != codex && "$agent" != claude ]]; then
+      printf 'OPUSDESK_AGENT must be codex or claude.\n' >&2; return 1
+    fi
+    [[ -n "${OPUSDESK_GITHUB_HOST:-}" ]] || github_host=''
+  fi
   case ":${initial_path}:" in
     *":${install_dir}:"*) ;;
     *)
@@ -358,10 +401,12 @@ main() (
       fi
       ;;
   esac
-  if [[ -n "$projects_dir" ]]; then
-    retry_step 'Opus Desk configuration' "${install_dir}/opus-desk" configure --agent "$agent" --github-host "$github_host" --projects "$projects_dir"
-  else
-    retry_step 'Opus Desk configuration' "${install_dir}/opus-desk" configure --agent "$agent" --github-host "$github_host"
+  local config_args=()
+  [[ -z "${agent:-}" ]] || config_args+=(--agent "$agent")
+  [[ -z "$github_host" ]] || config_args+=(--github-host "$github_host")
+  [[ -z "$projects_dir" ]] || config_args+=(--projects "$projects_dir")
+  if [[ ${#config_args[@]} -gt 0 ]]; then
+    retry_step 'Opus Desk configuration' "${install_dir}/opus-desk" configure "${config_args[@]}" || printf 'Configuration incomplete; use opus-desk configure later.\n' >&2
   fi
   if [[ "${OPUSDESK_START:-0}" == 1 ]] || { [[ "$noninteractive" != 1 ]] && confirm 'Start or restart Opus Desk now?'; }; then
     retry_step 'Opus Desk startup' "${install_dir}/opus-desk" restart
