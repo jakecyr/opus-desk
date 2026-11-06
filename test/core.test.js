@@ -34,6 +34,31 @@ test('review workflow requests pending comments by default', () => {
     /Do not submit or publish/,
   );
 });
+test('manual Fix CI prepares commits for an authorized push and diagnoses current job logs', () => {
+  const prompt = jobPrompt('ci', 'https://github.com/a/b/pull/1', {
+    pushOnCompletion: true,
+  });
+  assert.match(prompt, /latest failing checks and their job logs/);
+  assert.match(prompt, /without discarding unrelated local changes/);
+  assert.match(prompt, /Do not disable checks or weaken tests/);
+  assert.match(prompt, /Opus Desk will validate and push/);
+  assert.match(prompt, /Do not push directly, force-push, merge/);
+  assert.doesNotMatch(prompt, /stop for human approval/);
+  assert.match(
+    jobPrompt('ci', 'https://github.com/a/b/pull/1'),
+    /stop for human approval/,
+  );
+});
+test('PR repair workflows integrate the latest base and resolve conflicts', () => {
+  for (const kind of ['ci', 'comments', 'conflicts']) {
+    const prompt = jobPrompt(kind, 'https://github.com/a/b/pull/1');
+    assert.match(prompt, /Fetch the latest PR base branch/);
+    assert.match(prompt, /merge it into the working branch/);
+    assert.match(prompt, /resolve any conflicts/);
+    assert.match(prompt, /preserving the original PR head/);
+    assert.match(prompt, /Run relevant checks after integrating the base/);
+  }
+});
 test('issue workflow does not exceed selected outcome', () => {
   assert.match(
     jobPrompt('issue', 'x', { outcome: 'local changes only' }),

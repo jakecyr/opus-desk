@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { JobStatus, isJobBusy } from './JobStatus.jsx';
 import {
   CircleDot,
   MessageCircle,
@@ -36,22 +37,40 @@ export function IssueLinks({ item }) {
     </>
   );
 }
-export function IssueActions({ item, onAddress, onDescribe, onComment }) {
+export function IssueActions({
+  item,
+  onAddress,
+  onDescribe,
+  onComment,
+  job,
+  linked,
+}) {
+  const busy = isJobBusy(job);
   return (
     <div className="issue-actions">
-      <button className="button small" onClick={() => onAddress(item)}>
+      <JobStatus job={job} linked={linked} />
+      <button
+        className="button small"
+        disabled={busy}
+        onClick={() => onAddress(item)}
+      >
         Address issue <ArrowRight size={12} />
       </button>
       {typeof item.body === 'string' && !item.body.trim() && (
         <button
           className="button small"
+          disabled={busy}
           title="Use an agent to write and save a description from the title, discussion, and code"
           onClick={() => onDescribe(item)}
         >
           <Sparkles size={12} /> Add description
         </button>
       )}
-      <button className="button small" onClick={() => onComment(item)}>
+      <button
+        className="button small"
+        disabled={busy}
+        onClick={() => onComment(item)}
+      >
         <MessageCircle size={12} /> Comment
       </button>
     </div>
@@ -65,6 +84,8 @@ export function IssueRow({
   onDescribe,
   onComment,
   age,
+  job,
+  linked,
 }) {
   return (
     <div className="pr-row issue-row">
@@ -96,6 +117,8 @@ export function IssueRow({
         onAddress={onAddress}
         onDescribe={onDescribe}
         onComment={onComment}
+        job={job}
+        linked={linked}
       />
       <span className="row-time">{age(item.updatedAt)}</span>
     </div>
@@ -256,6 +279,8 @@ export function SprintPage({
   onDescribe,
   onComment,
   onSettings,
+  jobs = {},
+  links = {},
 }) {
   const [data, Data] = useState(null),
     [error, ErrorText] = useState(''),
@@ -465,6 +490,8 @@ export function SprintPage({
                           onAddress={onAddress}
                           onDescribe={onDescribe}
                           onComment={onComment}
+                          job={jobs[i.url]}
+                          linked={links[i.url]}
                         />
                       )}
                     </article>

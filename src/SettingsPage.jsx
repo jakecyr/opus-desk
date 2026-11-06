@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { ModelPicker, ReasoningPicker } from './ModelPicker.jsx';
 import { createAutosave } from './autosave.js';
 import { SprintSettings } from './Sprint.jsx';
+import { SettingsLayout } from './SettingsLayout.jsx';
 
 const toneHelp = {
   constructive: 'Calm and practical: explain the impact and suggest a fix.',
@@ -88,7 +89,7 @@ export function SettingsPage({
         </span>
       </div>
       {error && <div className="error">{error}</div>}
-      <div className="settings-grid">
+      <SettingsLayout>
         <section className="panel settings-card">
           <h2>Local tools</h2>
           {[
@@ -114,7 +115,7 @@ export function SettingsPage({
           ))}
         </section>
         <section className="panel settings-card">
-          <h2>Workspace defaults</h2>
+          <h2>Defaults</h2>
           <label>
             Code root folder
             <input
@@ -150,7 +151,7 @@ export function SettingsPage({
             </select>
           </label>
           <label>
-            Default agent
+            Agent
             <select
               value={agent}
               onChange={(e) => set('defaultAgent', e.target.value)}
@@ -167,7 +168,7 @@ export function SettingsPage({
             value={form[modelKey] || ''}
             onChange={(v) => set(modelKey, v)}
             models={models}
-            label="Default model"
+            label="Model"
           />
           <ReasoningPicker
             agent={agent}
@@ -192,7 +193,7 @@ export function SettingsPage({
         <section className="panel settings-card">
           <h2>Workflow overrides</h2>
           <p className="muted">
-            Blank values inherit workspace defaults. Linked sessions keep their
+            Override the defaults for each task. Linked sessions keep their
             agent and model.
           </p>
           {[
@@ -282,7 +283,7 @@ export function SettingsPage({
             suggestions where useful.
           </p>
         </section>
-      </div>
+      </SettingsLayout>
     </>
   );
 }
@@ -310,7 +311,7 @@ function WorkflowSetting({
               change({ ...value, agent: e.target.value, model: '', effort: '' })
             }
           >
-            <option value="">Workspace default</option>
+            <option value="">Default</option>
             <option value="codex">Codex</option>
             <option value="claude" disabled={!available.claude}>
               Claude Code
@@ -323,7 +324,7 @@ function WorkflowSetting({
           value={value.model || ''}
           onChange={(model) => change({ ...value, model })}
           models={models}
-          emptyLabel="Workspace default"
+          emptyLabel="Default"
         />
         <ReasoningPicker
           agent={agent}
@@ -331,7 +332,7 @@ function WorkflowSetting({
           models={models}
           value={value.effort || ''}
           onChange={(effort) => change({ ...value, effort })}
-          emptyLabel="Workspace default"
+          emptyLabel="Default"
         />
         <label>
           Permissions
@@ -339,7 +340,7 @@ function WorkflowSetting({
             value={value.permission || ''}
             onChange={(e) => change({ ...value, permission: e.target.value })}
           >
-            <option value="">Workspace default</option>
+            <option value="">Default</option>
             <option value="sandbox">Sandbox / CLI default</option>
             <option value="danger">Dangerous full access</option>
           </select>

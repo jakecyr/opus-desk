@@ -4,6 +4,7 @@ import { daemon, runningDaemon } from './daemon.js';
 import { localOptions } from './local.js';
 import { version } from './version.js';
 import { loadState, saveState } from './core.js';
+import { startAgentHost } from './agent-host.js';
 
 export function parseArgs(args) {
   const options = {};
@@ -39,6 +40,7 @@ export function parseArgs(args) {
 }
 
 export async function runCli(args, runtime) {
+  if (args.length === 1 && args[0] === 'agent-host') return startAgentHost();
   const { action, options } = parseArgs(args);
   if (action === 'help') {
     console.log(`Opus Desk ${version}
@@ -109,7 +111,11 @@ The daemon survives a closed terminal; it does not start at login.`);
     await fs.access(`${staticRoot}/index.html`).catch(() => {
       throw new Error('Dashboard assets are missing. Run npm run build first.');
     });
-    await startServer({ ...local, staticRoot });
+    await startServer({
+      ...local,
+      staticRoot,
+      agentRuntime: { entry: runtime.entry },
+    });
     return;
   }
   await daemon(action, { ...runtime, ...options });

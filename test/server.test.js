@@ -93,6 +93,14 @@ test('local API serves GitHub and Codex data, routes questions, and rejects cros
     });
   t.after(async () => {
     child.kill();
+    try {
+      const host = JSON.parse(
+        await fs.readFile(path.join(state, 'agents/host.json'), 'utf8'),
+      );
+      process.kill(-host.pid, 'SIGTERM');
+    } catch {
+      /* No host started. */
+    }
     await fs.rm(tmp, { recursive: true, force: true });
   });
   const base = `http://127.0.0.1:${port}`;

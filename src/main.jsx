@@ -12,7 +12,6 @@ import {
   GitPullRequest,
   CircleDot,
   Settings,
-  Anchor,
   Search,
   Plus,
   ArrowUpRight,
@@ -34,10 +33,12 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import './style.css';
+import opusMark from './assets/opus-mark.svg';
 import { ApprovalBoard, ApprovalPreview } from './Approvals.jsx';
 import { SettingsPage } from './SettingsPage.jsx';
 import { SessionModal } from './SessionModal.jsx';
 import { SprintPage, IssueRow } from './Sprint.jsx';
+import { JobStatus, isJobBusy } from './JobStatus.jsx';
 const api = async (url, opts = {}) => {
   const r = await fetch('/api' + url, {
     ...opts,
@@ -126,6 +127,7 @@ function App() {
     [loading, L] = useState(false),
     [sessionView, SessionView] = useState('active'),
     [approvals, Approvals] = useState([]),
+    [startingJobs, StartingJobs] = useState({}),
     [approvalKey, ApprovalKey] = useState(null),
     [closedLimit, ClosedLimit] = useState(false),
     [closed, Closed] = useState([]),
@@ -370,12 +372,22 @@ function App() {
     }
   };
   async function job(url, kind, outcome, options = {}) {
-    await guard(async () => {
-      let r = await post('/job', { url, kind, outcome, ...options });
+    StartingJobs((old) => ({ ...old, [url]: { kind, status: 'starting' } }));
+    try {
+      E('');
+      const r = await post('/job', { url, kind, outcome, ...options });
+      S((old) => ({ ...old, links: { ...old.links, [url]: r.id } }));
       Modal(null);
-      C(r.id);
-      setPage('sessions');
-    });
+      await refresh();
+    } catch (error) {
+      E(error.message);
+    } finally {
+      StartingJobs((old) => {
+        const next = { ...old };
+        delete next[url];
+        return next;
+      });
+    }
   }
   async function start(form) {
     await guard(async () => {
@@ -398,27 +410,46 @@ function App() {
         .catch((e) => E(e.message));
   };
   async function bulkIssues(urls, outcome, options) {
-    await guard(async () => {
-      const results = await Promise.allSettled(
-        urls.map((url) =>
-          post('/job', { url, kind: 'issue', outcome, ...options }),
-        ),
-      );
-      const failed = results
-        .map((r, i) =>
-          r.status === 'rejected' ? `${urls[i]}: ${r.reason.message}` : null,
-        )
-        .filter(Boolean);
-      SelectIssues(
-        failed.length
-          ? urls.filter((u, i) => results[i].status === 'rejected')
-          : [],
-      );
-      Modal(null);
-      if (failed.length) E(`Some jobs did not start: ${failed.join(' · ')}`);
-      else setPage('sessions');
-    });
+    StartingJobs((old) => ({
+      ...old,
+      ...Object.fromEntries(
+        urls.map((url) => [url, { kind: 'issue', status: 'starting' }]),
+      ),
+    }));
+    try {
+      await guard(async () => {
+        const results = await Promise.allSettled(
+          urls.map((url) =>
+            post('/job', { url, kind: 'issue', outcome, ...options }),
+          ),
+        );
+        const failed = results
+          .map((r, i) =>
+            r.status === 'rejected' ? `${urls[i]}: ${r.reason.message}` : null,
+          )
+          .filter(Boolean);
+        SelectIssues(
+          failed.length
+            ? urls.filter((u, i) => results[i].status === 'rejected')
+            : [],
+        );
+        Modal(null);
+        if (failed.length) E(`Some jobs did not start: ${failed.join(' · ')}`);
+      });
+    } finally {
+      StartingJobs((old) => {
+        const next = { ...old };
+        for (const url of urls) delete next[url];
+        return next;
+      });
+    }
   }
+  const jobsByUrl = {
+    ...Object.fromEntries(
+      [...approvals].reverse().map((task) => [task.url, task]),
+    ),
+    ...startingJobs,
+  };
   async function closeCleanup(urls) {
     try {
       E('');
@@ -519,17 +550,17 @@ function App() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand">
-          <div className="brandmark">
-            <Anchor size={19} />
-          </div>
-          <div>
-            <strong>Opus Desk</strong>
-            <small>YOUR LOCAL WORKSPACE</small>
-          </div>
-        </div>
-        <div className="side-label">WORKSPACE</div>
-        <nav>
+        <button
+          className="brand"
+          onClick={() => navigate('focus')}
+          aria-label="Opus Desk home"
+        >
+          <span className="brandmark">
+            <img src={opusMark} alt="" width="36" height="36" />
+          </span>
+          <strong>Opus Desk</strong>
+        </button>
+        <nav aria-label="Main navigation">
           {[
             ['focus', 'Focus', LayoutDashboard],
             ['sessions', 'Orchestrator', MessagesSquare],
@@ -543,6 +574,9 @@ function App() {
             <button
               key={key}
               className={page === key ? 'nav active' : 'nav'}
+              aria-label={label}
+              aria-current={page === key ? 'page' : undefined}
+              title={label}
               onClick={() => navigate(key)}
             >
               <Icon size={17} />
@@ -554,6 +588,9 @@ function App() {
         <div className="side-bottom">
           <button
             className={page === 'settings' ? 'nav active' : 'nav'}
+            aria-label="Settings"
+            aria-current={page === 'settings' ? 'page' : undefined}
+            title="Settings"
             onClick={() => navigate('settings')}
           >
             <Settings size={17} />
@@ -563,28 +600,12 @@ function App() {
             <span className="pulse" />{' '}
             <div>
               <b>Running locally</b>
-              <small>Your local dashboard</small>
             </div>
           </div>
         </div>
       </aside>
       <main>
         <header className="top">
-          <div className="crumb">
-            <b>
-              {
-                {
-                  sprint: 'Sprint',
-                  focus: 'Focus',
-                  sessions: 'Orchestrator',
-                  prs: 'Pull requests',
-                  issues: 'Issues',
-                  cleanup: 'Cleanup',
-                  settings: 'Settings',
-                }[page]
-              }
-            </b>
-          </div>
           <div className="top-actions">
             <button
               className={'auto-toggle ' + (status.autoEnabled ? 'on' : '')}
@@ -787,7 +808,6 @@ function App() {
                 <section className="panel">
                   <div className="panel-head">
                     <div>
-                      <span className="section-kicker">YOUR INBOX</span>
                       <h2>
                         Needs your review{' '}
                         <span className="count">{unread.length}</span>
@@ -809,6 +829,7 @@ function App() {
                         key={pr.url}
                         pr={pr}
                         linked={status.links?.[pr.url]}
+                        job={jobsByUrl[pr.url]}
                         onJob={job}
                         onChat={(id) => {
                           C(id);
@@ -829,9 +850,6 @@ function App() {
                 <section className="panel">
                   <div className="panel-head">
                     <div>
-                      <span className="section-kicker">
-                        PICK UP WHERE YOU LEFT OFF
-                      </span>
                       <h2>Recent sessions</h2>
                     </div>
                     <button
@@ -865,8 +883,9 @@ function App() {
               </div>
               <div className="footnote">
                 <span className="pulse" /> GitHub{' '}
-                {data.updated ? `updated ${age(data.updated)}` : 'connecting'}{' '}
-                <span>·</span> Uses your existing gh authentication
+                {data.updated
+                  ? `updated ${age(data.updated)}`
+                  : 'connecting'}{' '}
               </div>
             </>
           )}
@@ -978,6 +997,7 @@ function App() {
                 prs={prs}
                 links={status.links || {}}
                 job={job}
+                jobs={jobsByUrl}
                 openChat={(id) => {
                   C(id);
                   navigate('sessions');
@@ -1075,6 +1095,8 @@ function App() {
                         )
                       }
                       age={age}
+                      job={jobsByUrl[x.url]}
+                      linked={status.links?.[x.url]}
                       onAddress={(item) => Modal({ type: 'issue', item })}
                       onDescribe={(item) => Modal({ type: 'describe', item })}
                       onComment={(item) => Modal({ type: 'comment', item })}
@@ -1107,6 +1129,8 @@ function App() {
               settings={status.settings}
               api={api}
               revision={data.updated}
+              jobs={jobsByUrl}
+              links={status.links}
               onSettings={() => navigate('settings')}
               onAddress={(item) => Modal({ type: 'issue', item })}
               onDescribe={(item) => Modal({ type: 'describe', item })}
@@ -1245,6 +1269,7 @@ function App() {
           )}
           {page === 'sessions' && (
             <>
+              <h1 className="sr-only">Orchestrator</h1>
               <div className="sessions-layout">
                 <section className="panel session-list">
                   <div className="session-toolbar">
@@ -1399,8 +1424,7 @@ function App() {
                       <div className="empty-art">
                         <MessagesSquare size={24} />
                       </div>
-                      <h2>All your work, in context.</h2>
-                      <p>Choose a session on the left or start a new one.</p>
+                      <h2>Choose a session</h2>
                       <button
                         className="button"
                         onClick={() => Modal({ type: 'new' })}
@@ -1411,6 +1435,16 @@ function App() {
                   )}
                 </section>
               </div>
+            </>
+          )}
+          {page === 'settings' && !statusLoaded && (
+            <>
+              <div className="compact-title">
+                <h1>Settings</h1>
+              </div>
+              <p className="muted" role="status">
+                Loading settings…
+              </p>
             </>
           )}
           {page === 'settings' && statusLoaded && (
@@ -1531,7 +1565,7 @@ function SearchBox({ value, set, placeholder }) {
     </label>
   );
 }
-function PRBoard({ prs, links, job, openChat }) {
+function PRBoard({ prs, links, job, openChat, jobs }) {
   const lanes = [
     ['Review requested', (p) => p.roles?.includes('review')],
     ['My draft comments', (p) => p.pendingReview],
@@ -1562,6 +1596,7 @@ function PRBoard({ prs, links, job, openChat }) {
                     key={pr.url}
                     pr={pr}
                     linked={links[pr.url]}
+                    job={jobs?.[pr.url]}
                     onJob={job}
                     onChat={openChat}
                   />
@@ -1576,7 +1611,8 @@ function PRBoard({ prs, links, job, openChat }) {
     </div>
   );
 }
-function PRRow({ pr, linked, onJob, onChat }) {
+function PRRow({ pr, linked, onJob, job }) {
+  const busy = isJobBusy(job);
   return (
     <div className="pr-row">
       <div className="row-icon">
@@ -1616,19 +1652,11 @@ function PRRow({ pr, linked, onJob, onChat }) {
       {pr.isDraft && <span className="tag">Draft</span>}
       {onJob && pr.state?.toUpperCase() === 'OPEN' && (
         <div className="inline-actions">
-          {linked && (
-            <button
-              className="inline-action"
-              title="Open linked chat"
-              onClick={() => onChat(linked)}
-            >
-              <MessagesSquare size={14} />
-              <span>Chat</span>
-            </button>
-          )}
+          <JobStatus job={job} linked={linked} />
           <button
             className="inline-action"
             title={wasReviewed(pr) ? 'Re-review PR' : 'Review PR'}
+            disabled={busy}
             onClick={() => onJob(pr.url, 'review')}
           >
             <Sparkles size={14} />
@@ -1637,15 +1665,30 @@ function PRRow({ pr, linked, onJob, onChat }) {
           <button
             className="inline-action"
             title="Address comments"
+            disabled={busy}
             onClick={() => onJob(pr.url, 'comments')}
           >
             <MessageCircle size={14} />
             <span>Address comments</span>
           </button>
+          {pr.checkState === 'FAILURE' && (
+            <button
+              className="inline-action"
+              title="Fix failing CI, commit, and push to this PR branch"
+              disabled={busy}
+              onClick={() =>
+                onJob(pr.url, 'ci', undefined, { pushOnCompletion: true })
+              }
+            >
+              <CircleCheck size={14} />
+              <span>Fix CI</span>
+            </button>
+          )}
           {pr.mergeable === 'CONFLICTING' && (
             <button
               className="inline-action"
               title="Resolve conflicts"
+              disabled={busy}
               onClick={() => onJob(pr.url, 'conflicts')}
             >
               <GitMerge size={14} />

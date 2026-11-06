@@ -139,7 +139,7 @@ export function runClaude(
       params: { threadId: 'claude:' + id, error: e.message },
     });
   });
-  p.on('exit', (code) => {
+  p.on('close', (code) => {
     activeClaude.delete('claude:' + id);
     emit({
       method: 'turn/completed',
