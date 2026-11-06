@@ -15,9 +15,11 @@ curl -fsSL https://github.com/jakecyr/opus-desk/releases/latest/download/install
 
 The interactive installer:
 
-1. Installs or updates Git and GitHub CLI using Homebrew, and guides GitHub sign-in with the required permissions.
+1. Installs or updates Git and GitHub CLI using Homebrew, and offers GitHub sign-in with the required permissions, and supports a custom GitHub Enterprise hostname.
 2. Lets you choose Codex or Claude Code, installs its latest native release, and guides sign-in.
 3. Installs the verified Opus Desk binary, helps configure PATH, asks where your projects live, and offers to start it.
+
+Run `opus-desk update` to install the latest release, then `opus-desk restart` to update a running daemon. Rerunning the installer also installs the latest release.
 
 Open **http://127.0.0.1:4317**. No Node.js installation is needed. You need an account with access to your chosen agent; provider usage follows your plan or API billing.
 

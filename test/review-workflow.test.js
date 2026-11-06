@@ -68,7 +68,7 @@ if(a[0]==='issue'&&a[1]==='comment'){fs.appendFileSync(process.env.REVIEW_WRITES
 if(a[0]==='--version'){console.log('gh test');process.exit(0)}
 if(a[0]==='search')result=f.auto&&a[1]==='prs'&&a.includes('--review-requested')?[{...pr,state:'open',updatedAt:'2026-01-01T00:00:00Z',repository:{nameWithOwner:'a/b'}}]:[];
 else if(a[0]==='pr'&&a[1]==='view'){if(f.fail)process.exit(1);result=pr;}
-else if(a[0]==='api'&&a[1]==='graphql')result={data:{viewer:{login:'me'},p0:{pullRequest:{headRefOid:f.head,baseRefOid:'base',mergeable:'MERGEABLE',reviews:{nodes:[{author:{login:'me'},state:'COMMENTED'}]},commits:{nodes:[]}}}}};
+else if(a[0]==='api'&&a.includes('graphql'))result={data:{viewer:{login:'me'},p0:{pullRequest:{headRefOid:f.head,baseRefOid:'base',mergeable:'MERGEABLE',reviews:{nodes:[{author:{login:'me'},state:'COMMENTED'}]},commits:{nodes:[]}}}}};
 else if(a.at(-1)==='user')result={login:'me'};
 else {const responses={'repos/a/b/issues/7/comments':[[{body:'PR discussion'}]],'repos/a/b/pulls/7/reviews':[[{user:{login:'me'},state:'COMMENTED',body:'Earlier feedback',commit_id:'older'},...(f.pending?[{id:99,user:{login:'me'},state:'PENDING',body:'Draft body',commit_id:f.head}]:[])]],'repos/a/b/pulls/7/reviews/99/comments':[[{id:1,path:'file.txt',line:1,body:'Check the edge case.'}]],'repos/a/b/pulls/7/comments':[[{body:'Inline discussion',path:'file.txt',line:1}]],'repos/a/b/issues/5':{title:'Linked issue',body:'Acceptance criteria'},'repos/a/b/issues/5/comments':[[{body:'Issue discussion'}]]};result=responses[a.at(-1).split('?')[0]];if(result===undefined)process.exit(1);}
 console.log(JSON.stringify(result));

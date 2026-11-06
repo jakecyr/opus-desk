@@ -32,22 +32,26 @@ setup_github() {
   fi
   command -v gh >/dev/null || { printf 'GitHub CLI is missing. Rerun interactively to install it.\n' >&2; exit 1; }
   command -v git >/dev/null || { printf 'Git is missing. Rerun interactively to install it.\n' >&2; exit 1; }
-  if ! gh auth status --active --hostname github.com >/dev/null 2>&1; then
-    [[ "$noninteractive" != 1 ]] || { printf 'Run gh auth login --hostname github.com --scopes repo,read:org,workflow,read:project first.\n' >&2; exit 1; }
-    printf 'Sign in to GitHub. Opus Desk needs repository and organization access; workflow allows agent fixes to CI files.\n'
-    gh auth login --hostname github.com --web --git-protocol https --scopes repo,read:org,workflow,read:project < /dev/tty
+  if ! gh auth status --active --hostname "$github_host" >/dev/null 2>&1; then
+    [[ "$noninteractive" != 1 ]] || { printf 'Run gh auth login --hostname %s --scopes repo,read:org,workflow,read:project first.\n' "$github_host" >&2; exit 1; }
+    if ! confirm "Authenticate GitHub CLI with ${github_host} now?"; then
+      printf 'Skipping GitHub authentication. Run gh auth login --hostname %s when ready.\n' "$github_host"
+      return 0
+    fi
+    printf 'Opus Desk needs repository and organization access; workflow allows agent fixes to CI files.\n'
+    gh auth login --hostname "$github_host" --web --git-protocol https --scopes repo,read:org,workflow,read:project < /dev/tty
   fi
   local headers scopes missing scope
-  headers="$(gh api --hostname github.com --include user)"
+  headers="$(gh api --hostname "$github_host" --include user)"
   scopes="$(printf '%s\n' "$headers" | awk 'tolower($0) ~ /^x-oauth-scopes:/ {sub(/^[^:]*:[[:space:]]*/, ""); gsub(/[[:space:]\r]/, ""); print}')"
   if [[ -z "$scopes" ]]; then
     printf 'Cannot verify OAuth scopes. Use GitHub CLI browser login (repo, read:org, workflow, read:project). Fine-grained/environment tokens need per-repository checks.\n' >&2
-    if [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" || "$noninteractive" == 1 ]]; then
-      printf 'Unset GH_TOKEN/GITHUB_TOKEN and rerun interactively, or authenticate gh with the scopes above.\n' >&2
+    if [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}${GH_ENTERPRISE_TOKEN:-}${GITHUB_ENTERPRISE_TOKEN:-}" || "$noninteractive" == 1 ]]; then
+      printf 'Unset GitHub token environment variables and rerun interactively, or authenticate gh with the scopes above.\n' >&2
       exit 1
     fi
-    gh auth refresh --hostname github.com --scopes repo,read:org,workflow,read:project < /dev/tty
-    headers="$(gh api --hostname github.com --include user)"
+    gh auth refresh --hostname "$github_host" --scopes repo,read:org,workflow,read:project < /dev/tty
+    headers="$(gh api --hostname "$github_host" --include user)"
     scopes="$(printf '%s\n' "$headers" | awk 'tolower($0) ~ /^x-oauth-scopes:/ {sub(/^[^:]*:[[:space:]]*/, ""); gsub(/[[:space:]\r]/, ""); print}')"
   fi
   missing=''
@@ -61,15 +65,15 @@ setup_github() {
   done
   if [[ -n "$missing" ]]; then
     printf 'GitHub access is missing: %s\n' "${missing%,}" >&2
-    if [[ "$noninteractive" == 1 || -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
-      printf 'Run gh auth refresh --hostname github.com --scopes repo,read:org,workflow,read:project (unset environment tokens first).\n' >&2
+    if [[ "$noninteractive" == 1 || -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}${GH_ENTERPRISE_TOKEN:-}${GITHUB_ENTERPRISE_TOKEN:-}" ]]; then
+      printf 'Run gh auth refresh --hostname %s --scopes repo,read:org,workflow,read:project (unset environment tokens first).\n' "$github_host" >&2
       exit 1
     fi
-    gh auth refresh --hostname github.com --scopes repo,read:org,workflow,read:project < /dev/tty
+    gh auth refresh --hostname "$github_host" --scopes repo,read:org,workflow,read:project < /dev/tty
     # Verify again rather than assuming the browser flow granted access.
     noninteractive=1 setup_github
   fi
-  gh auth setup-git --hostname github.com
+  gh auth setup-git --hostname "$github_host"
   gh --version | head -n 1
   printf 'GitHub authentication and OAuth scopes verified. Organization SSO and repository roles still apply.\n'
 }
@@ -167,12 +171,22 @@ main() (
     printf 'Checksum mismatch; refusing to install.\n' >&2; return 1
   fi
   local noninteractive="${OPUSDESK_NONINTERACTIVE:-0}" agent brew_updated=0
+  local github_host="${OPUSDESK_GITHUB_HOST:-github.com}"
   export PATH="${HOME}/.local/bin:${PATH}:/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin"
   if [[ "$noninteractive" != 1 ]]; then
     if ! ( : < /dev/tty ) 2>/dev/null; then
       printf 'Interactive setup needs a terminal. For preconfigured machines set OPUSDESK_NONINTERACTIVE=1 and OPUSDESK_AGENT.\n' >&2; return 1
     fi
     confirm 'Set up GitHub, install/update your agent, and install Opus Desk?' || return 1
+  fi
+  if [[ "$noninteractive" != 1 ]]; then
+    printf 'GitHub hostname [%s]: ' "$github_host" > /dev/tty
+    local host_answer
+    read -r host_answer < /dev/tty
+    github_host="${host_answer:-$github_host}"
+  fi
+  if [[ ! "$github_host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || "$github_host" == *..* ]]; then
+    printf 'Invalid GitHub hostname. Enter a hostname without a protocol or port.\n' >&2; return 1
   fi
   setup_github
   setup_agent
@@ -215,9 +229,9 @@ main() (
     projects_dir="${projects_dir:-$default_root}"
   fi
   if [[ -n "$projects_dir" ]]; then
-    "${install_dir}/opus-desk" configure --agent "$agent" --projects "$projects_dir"
+    "${install_dir}/opus-desk" configure --agent "$agent" --github-host "$github_host" --projects "$projects_dir"
   else
-    "${install_dir}/opus-desk" configure --agent "$agent"
+    "${install_dir}/opus-desk" configure --agent "$agent" --github-host "$github_host"
   fi
   if [[ "${OPUSDESK_START:-0}" == 1 ]] || { [[ "$noninteractive" != 1 ]] && confirm 'Start or restart Opus Desk now?'; }; then
     "${install_dir}/opus-desk" restart

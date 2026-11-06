@@ -117,6 +117,14 @@ export function SettingsPage({
         <section className="panel settings-card">
           <h2>Defaults</h2>
           <label>
+            GitHub hostname
+            <input
+              value={form.githubHost || 'github.com'}
+              onChange={(e) => set('githubHost', e.target.value)}
+              placeholder="github.com"
+            />
+          </label>
+          <label>
             Code root folder
             <input
               value={form.root || ''}

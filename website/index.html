@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Automate GitHub PR reviews, CI fixes, merge conflicts, and issue work with Opus Desk, a local-first dashboard for coding agents."
+    />
+    <meta name="theme-color" content="#f5f3ed" />
+    <title>Opus Desk — Automate GitHub Work with Coding Agents</title>
+    <link rel="canonical" href="https://jakecyr.github.io/opus-desk/" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Opus Desk" />
+    <meta
+      property="og:title"
+      content="Opus Desk — Automate GitHub Work with Coding Agents"
+    />
+    <meta
+      property="og:description"
+      content="Bring GitHub work and coding agents together. Review PRs, fix CI, resolve conflicts, and move issues forward from one local dashboard."
+    />
+    <meta property="og:url" content="https://jakecyr.github.io/opus-desk/" />
+    <meta
+      property="og:image"
+      content="https://jakecyr.github.io/opus-desk/social-card.png"
+    />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Opus Desk: Make room for the work that matters."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="Opus Desk — Automate GitHub Work with Coding Agents"
+    />
+    <meta
+      name="twitter:description"
+      content="Bring GitHub work and coding agents together in one local dashboard."
+    />
+    <meta
+      name="twitter:image"
+      content="https://jakecyr.github.io/opus-desk/social-card.png"
+    />
+    <meta
+      name="twitter:image:alt"
+      content="Opus Desk: Make room for the work that matters."
+    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Opus Desk",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux",
+        "description": "A local-first dashboard for GitHub pull requests, issues, and coding agent workflows.",
+        "url": "https://jakecyr.github.io/opus-desk/",
+        "codeRepository": "https://github.com/jakecyr/opus-desk",
+        "license": "https://github.com/jakecyr/opus-desk/blob/master/LICENSE"
+      }
+    </script>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="header wrap">
+      <a class="brand" href="#top" aria-label="Opus Desk home"
+        ><span class="brand-mark">✳</span> opus<span>desk</span
+        ><span class="brand-dot">.</span></a
+      >
+      <nav aria-label="Main navigation">
+        <a href="#workflows">Workflows</a
+        ><a href="#how-it-works">How it works</a
+        ><a href="https://github.com/jakecyr/opus-desk"
+          >GitHub <span aria-hidden="true">↗</span></a
+        >
+      </nav>
+      <a class="nav-cta" href="#get-started"
+        >Get started <span aria-hidden="true">↗</span></a
+      >
+    </header>
+    <main id="top">
+      <section class="hero wrap">
+        <div class="hero-copy">
+          <div class="eyebrow">
+            <span class="status-dot"></span> YOUR WORK, IN GOOD HANDS
+          </div>
+          <h1>Make room for the <em>work that matters.</em></h1>
+          <p>
+            PRs, issues, CI, and the little things in between. Opus Desk brings
+            your GitHub work and coding agents together so the busywork can move
+            forward while you do.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-dark" href="#get-started"
+              >Get started <span>↗</span></a
+            ><a class="text-link" href="https://github.com/jakecyr/opus-desk"
+              >Explore on GitHub <span>↗</span></a
+            >
+          </div>
+          <div class="hero-note">
+            <span>✳</span> LOCAL-FIRST <i></i> OPEN SOURCE <i></i> BUILT FOR
+            YOUR FLOW
+          </div>
+        </div>
+        <div
+          class="hero-art"
+          aria-label="Illustration of an Opus Desk workflow"
+        >
+          <div class="orbit orbit-one"></div>
+          <div class="orbit orbit-two"></div>
+          <div class="art-caption">A LITTLE LESS TO JUGGLE <span>✳</span></div>
+          <div class="dashboard">
+            <div class="dash-top">
+              <span class="mini-brand">✳ <b>opus desk</b></span
+              ><span class="dash-dots">•••</span>
+            </div>
+            <div class="dash-body">
+              <div class="dash-sidebar">
+                <span class="side-active">◫ &nbsp; Focus</span
+                ><span>⑂ &nbsp; Pull requests</span><span>◉ &nbsp; Issues</span
+                ><span>▧ &nbsp; Sessions</span>
+                <div class="side-bottom">● &nbsp; Agent ready</div>
+              </div>
+              <div class="dash-main">
+                <div class="dash-heading">
+                  <div>
+                    <small>YOUR WORKSPACE</small><strong>Good morning.</strong>
+                  </div>
+                  <span>✳</span>
+                </div>
+                <p>Here's what's moving today.</p>
+                <div class="dash-label">IN PROGRESS <span>02</span></div>
+                <div class="task">
+                  <div class="task-icon purple">⑂</div>
+                  <div>
+                    <b>Review pull request</b
+                    ><small>Checking changes and preparing feedback</small>
+                  </div>
+                  <span class="task-status">WORKING</span>
+                </div>
+                <div class="task">
+                  <div class="task-icon peach">✳</div>
+                  <div>
+                    <b>Fix failing CI</b
+                    ><small>Investigating the failed checks</small>
+                  </div>
+                  <span class="task-status">WORKING</span>
+                </div>
+                <div class="dash-label next-label">
+                  READY FOR YOU <span>01</span>
+                </div>
+                <div class="task ready">
+                  <div class="task-icon green">✓</div>
+                  <div>
+                    <b>Issue implementation</b
+                    ><small>Ready to review on Focus</small>
+                  </div>
+                  <span>↗</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="floating-note">
+            <span>✦</span>
+            <div><b>One less thing.</b><small>Your agent is on it.</small></div>
+          </div>
+          <div class="art-footer">
+            YOUR DESK, WITH A LITTLE MORE ROOM. <span>01 / 04</span>
+          </div>
+        </div>
+      </section>
+      <div class="ticker">
+        <div class="wrap">
+          <span>MADE FOR THE WORK BETWEEN THE WORK</span><span>✳</span
+          ><span>LESS CONTEXT SWITCHING</span><span>✳</span
+          ><span>MORE MOMENTUM</span><span>✳</span
+          ><span>YOU'RE STILL IN THE LOOP</span>
+        </div>
+      </div>
+      <section class="intro wrap" id="workflows">
+        <div>
+          <div class="eyebrow">01 / THE EVERYDAY STUFF</div>
+          <h2>Give the repetitive work <em>somewhere to go.</em></h2>
+        </div>
+        <p>
+          There’s more to shipping than writing code. Hand the follow-through to
+          an agent, and keep the whole picture in one calm place.
+        </p>
+      </section>
+      <section class="workflows wrap" aria-label="Example workflows">
+        <article class="workflow">
+          <div class="workflow-top"><span>01</span><span>⑂</span></div>
+          <h3>Thoughtful PR reviews, already underway.</h3>
+          <p>
+            Turn a review request into an agent task. It can inspect the changes
+            and prepare a draft review for you to look over.
+          </p>
+          <div class="workflow-tag">REVIEW REQUESTED <span>↗</span></div>
+        </article>
+        <article class="workflow">
+          <div class="workflow-top"><span>02</span><span>✳</span></div>
+          <h3>Get a head start on broken CI.</h3>
+          <p>
+            Send an agent to investigate failed checks, work through the logs,
+            and fix the problem. Fix CI can push the completed fix to the PR
+            branch.
+          </p>
+          <div class="workflow-tag">CHECKS FAILING <span>↗</span></div>
+        </article>
+        <article class="workflow">
+          <div class="workflow-top"><span>03</span><span>⌘</span></div>
+          <h3>Untangle conflicts and feedback.</h3>
+          <p>
+            When a PR needs attention, Auto mode can start an agent to resolve
+            conflicts or address outstanding review feedback.
+          </p>
+          <div class="workflow-tag">PR NEEDS ATTENTION <span>↗</span></div>
+        </article>
+        <article class="workflow">
+          <div class="workflow-top"><span>04</span><span>◉</span></div>
+          <h3>Move issues toward done.</h3>
+          <p>
+            Start a contextual agent session from an issue, or let Auto mode
+            pick up assigned issues and prepare work for your review.
+          </p>
+          <div class="workflow-tag">ISSUE ASSIGNED <span>↗</span></div>
+        </article>
+      </section>
+      <section class="process" id="how-it-works">
+        <div class="wrap process-grid">
+          <div class="process-heading">
+            <div class="eyebrow">02 / A BETTER RHYTHM</div>
+            <h2>Less managing.<br /><em>More making.</em></h2>
+            <p>
+              Your work stays close, your agents keep moving, and you decide
+              what goes out.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/jakecyr/opus-desk/blob/master/docs/usage.md"
+              >Read how it works <span>↗</span></a
+            >
+          </div>
+          <div class="steps">
+            <div class="step">
+              <span>01</span>
+              <div>
+                <h3>Bring your work together.</h3>
+                <p>
+                  See your GitHub pull requests, assigned issues, and agent
+                  sessions in a local dashboard.
+                </p>
+              </div>
+            </div>
+            <div class="step">
+              <span>02</span>
+              <div>
+                <h3>Put an agent on it.</h3>
+                <p>
+                  Start a task yourself or switch on Auto mode to watch for work
+                  that needs attention.
+                </p>
+              </div>
+            </div>
+            <div class="step">
+              <span>03</span>
+              <div>
+                <h3>Review, then publish.</h3>
+                <p>
+                  Prepared results land on Focus for your approval. You stay in
+                  control of what gets published.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="wrap process-foot">
+          ✳ &nbsp; AUTO MODE IS OFF BY DEFAULT
+          <span>GOOD WORK HAPPENS HERE ↗</span>
+        </div>
+      </section>
+      <section class="closer wrap" id="get-started">
+        <div class="closer-spark">✳</div>
+        <div class="eyebrow">03 / MAKE YOURSELF AT HOME</div>
+        <h2>A little help goes <em>a long way.</em></h2>
+        <p>
+          Bring some breathing room back to your day. Get started with Opus Desk
+          on macOS or Linux.
+        </p>
+        <div class="install">
+          <span>$</span
+          ><code
+            >curl -fsSL
+            https://github.com/jakecyr/opus-desk/releases/latest/download/install.sh
+            | bash</code
+          >
+        </div>
+        <div class="closer-links">
+          <a
+            class="button button-dark"
+            href="https://github.com/jakecyr/opus-desk#readme"
+            >View installation guide <span>↗</span></a
+          ><a class="text-link" href="https://github.com/jakecyr/opus-desk"
+            >Star on GitHub <span>↗</span></a
+          >
+        </div>
+        <p class="install-note">
+          Requires GitHub CLI and access to Codex or Claude Code.
+          <a
+            href="https://github.com/jakecyr/opus-desk/blob/master/docs/installation.md"
+            >Installation details ↗</a
+          >
+        </p>
+      </section>
+    </main>
+    <footer class="footer">
+      <div class="wrap footer-inner">
+        <a class="brand" href="#top"
+          ><span class="brand-mark">✳</span> opus<span>desk</span
+          ><span class="brand-dot">.</span></a
+        >
+        <p>A little more room to do your best work.</p>
+        <div>
+          <a href="https://github.com/jakecyr/opus-desk">GitHub ↗</a
+          ><a href="https://github.com/jakecyr/opus-desk/blob/master/LICENSE"
+            >MIT License ↗</a
+          >
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

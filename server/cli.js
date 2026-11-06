@@ -3,8 +3,10 @@ import { startServer } from './app.js';
 import { daemon, runningDaemon } from './daemon.js';
 import { localOptions } from './local.js';
 import { version } from './version.js';
-import { loadState, saveState } from './core.js';
+import { loadState, saveState, setGithubHost } from './core.js';
 import { startAgentHost } from './agent-host.js';
+import { updateBinary } from './update.js';
+import { isSea } from 'node:sea';
 
 export function parseArgs(args) {
   const options = {};
@@ -14,13 +16,27 @@ export function parseArgs(args) {
   if (['--version', '-v', 'version'].includes(action))
     return { action: 'version', options };
   if (
-    !['start', 'stop', 'restart', 'status', 'run', 'configure'].includes(action)
+    ![
+      'start',
+      'stop',
+      'restart',
+      'status',
+      'run',
+      'configure',
+      'update',
+    ].includes(action)
   )
     throw new Error(`Unknown command: ${action}. Run opus-desk --help.`);
   for (let i = 0; i < rest.length; i += 2) {
     const name = rest[i];
     if (
-      !['--port', '--hostname', '--agent', '--projects'].includes(name) ||
+      ![
+        '--port',
+        '--hostname',
+        '--agent',
+        '--projects',
+        '--github-host',
+      ].includes(name) ||
       !rest[i + 1] ||
       rest[i + 1].startsWith('--')
     ) {
@@ -28,7 +44,7 @@ export function parseArgs(args) {
     }
     const allowed =
       action === 'configure'
-        ? ['--agent', '--projects']
+        ? ['--agent', '--projects', '--github-host']
         : ['start', 'restart', 'run'].includes(action)
           ? ['--port', '--hostname']
           : [];
@@ -52,7 +68,8 @@ Usage: opus-desk <command> [options]
   restart   Stop and start the daemon
   status    Show the daemon URL, PID, and log path
   run       Serve in the foreground (Ctrl-C to stop)
-  configure Set --agent codex|claude and/or --projects <parent-directory>
+  update    Install the latest release
+  configure Set --agent, --projects, and/or --github-host
 
 Options for start, restart, and run:
   --port <number>       Listening port (default: 4317; also PORT)
@@ -69,12 +86,22 @@ The daemon survives a closed terminal; it does not start at login.`);
     console.log(version);
     return;
   }
+  if (action === 'update') {
+    if (!isSea())
+      throw new Error(
+        'Update is available for installed release binaries. For a source checkout, update it with Git.',
+      );
+    await updateBinary();
+    return;
+  }
   if (action === 'configure') {
     if (options.agent && !['codex', 'claude'].includes(options.agent))
       throw new Error('Agent must be codex or claude');
     if (options.projects && !(await fs.stat(options.projects)).isDirectory())
       throw new Error('Projects path must be a directory');
     const patch = {};
+    if (options['github-host'])
+      patch.githubHost = setGithubHost(options['github-host']);
     if (options.agent) patch.defaultAgent = options.agent;
     if (options.projects) patch.root = await fs.realpath(options.projects);
     const active = await runningDaemon();

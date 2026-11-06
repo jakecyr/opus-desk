@@ -1,11 +1,14 @@
 import { useState, useEffect } from 'react';
 import { X, ArrowRight, MessagesSquare } from 'lucide-react';
 import { ModelPicker, ReasoningPicker } from './ModelPicker.jsx';
-const canonical = (value) => {
+const canonical = (value, host) => {
   try {
     const u = new URL(value);
     return u.protocol === 'https:' &&
-      u.hostname === 'github.com' &&
+      u.hostname === host &&
+      !u.port &&
+      !u.username &&
+      !u.password &&
       /^\/[^/]+\/[^/]+\/pull\/\d+\/?$/.test(u.pathname)
       ? u.origin + u.pathname.replace(/\/$/, '')
       : '';
@@ -65,7 +68,10 @@ export function SessionModal({
     ),
     [body, Body] = useState(''),
     [reviewState, ReviewState] = useState(null);
-  const normalized = canonical(url.trim());
+  const normalized = canonical(
+    url.trim(),
+    status.settings.githubHost || 'github.com',
+  );
   useEffect(() => {
     ReviewState(null);
     if (modal.type !== 'review' || !normalized) return;

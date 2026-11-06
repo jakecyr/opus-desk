@@ -103,3 +103,20 @@ test('auto mode deduplicates events by PR revision and issue identity', () => {
     ['conflicts', 'ci', 'review'],
   );
 });
+
+test('GitHub Enterprise host is validated and used for URLs', async () => {
+  const { setGithubHost, canonicalGithubUrl } =
+    await import('../server/core.js');
+  setGithubHost('git.example.com');
+  try {
+    assert.equal(
+      canonicalGithubUrl('https://git.example.com/a/b/pull/3?x=1'),
+      'https://git.example.com/a/b/pull/3',
+    );
+    assert.throws(() => githubUrl('https://github.com/a/b/pull/3'));
+    assert.throws(() => setGithubHost('https://evil.example'));
+    assert.equal(process.env.GH_HOST, 'git.example.com');
+  } finally {
+    setGithubHost('github.com');
+  }
+});

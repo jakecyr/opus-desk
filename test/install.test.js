@@ -191,6 +191,92 @@ esac
   );
   assert.match(calls, /native-installer latest/);
   assert.match(calls, /claude auth login/);
-  assert.match(calls, /configure --agent claude --projects/);
+  assert.match(
+    calls,
+    /configure --agent claude --github-host github\.com --projects/,
+  );
   assert.doesNotMatch(calls, /^start$/m);
+});
+
+test('rerunning the installer replaces the existing binary with the latest release', async (t) => {
+  const f = await fixture(t);
+  await fs.mkdir(f.env.OPUSDESK_INSTALL_DIR);
+  const installed = path.join(f.env.OPUSDESK_INSTALL_DIR, 'opus-desk');
+  await fs.writeFile(installed, 'old release');
+  const result = await f.run();
+  assert.match(result.stdout, /v1\.2\.3/);
+  assert.match(await fs.readFile(installed, 'utf8'), /^#!\/bin\/sh/);
+});
+
+test('updater replaces the actual executable and rejects a corrupt release', async (t) => {
+  const f = await fixture(t);
+  const installed = path.join(f.dir, 'installed');
+  const alias = path.join(f.dir, 'alias');
+  await fs.writeFile(installed, 'old release');
+  await fs.symlink(installed, alias);
+  const moduleUrl = new URL('../server/update.js', import.meta.url).href;
+  const run = (env) =>
+    exec(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `import { updateBinary } from ${JSON.stringify(moduleUrl)}; await updateBinary(process.argv[1]);`,
+        alias,
+      ],
+      { env },
+    );
+  await assert.rejects(
+    run({ ...f.env, FIXTURE_DIGEST: '0'.repeat(64) }),
+    /Checksum mismatch/,
+  );
+  assert.equal(await fs.readFile(installed, 'utf8'), 'old release');
+  const result = await run(f.env);
+  assert.match(result.stdout, /v1\.2\.3/);
+  assert.match(await fs.readFile(installed, 'utf8'), /^#!\/bin\/sh/);
+  assert.equal((await fs.lstat(alias)).isSymbolicLink(), true);
+});
+
+test('interactive setup accepts an enterprise host and respects declining GitHub sign-in', async (t) => {
+  const f = await fixture(t, {
+    FIXTURE_AUTH: '0',
+    FIXTURE_HOST: 'git.example.com',
+    FIXTURE_AUTH_ANSWER: 'n',
+  });
+  delete f.env.OPUSDESK_NONINTERACTIVE;
+  delete f.env.OPUSDESK_AGENT;
+  f.env.FIXTURE_SCRIPT = script;
+  const bin = path.join(f.dir, 'bin');
+  await fs.writeFile(path.join(bin, 'brew'), '#!/bin/sh\nexit 0\n', {
+    mode: 0o755,
+  });
+  const curl = path.join(bin, 'curl');
+  await fs.writeFile(
+    curl,
+    (await fs.readFile(curl, 'utf8')).replace(
+      '  *) exit 1 ;;',
+      '  https://claude.ai/install.sh) cp "$HOME/native-installer" "$out" ;;\n  *) exit 1 ;;',
+    ),
+  );
+  await fs.writeFile(
+    path.join(f.dir, 'native-installer'),
+    '#!/bin/sh\nexit 0\n',
+  );
+  const result = await exec(
+    'python3',
+    [
+      fileURLToPath(
+        new URL('./fixtures/installer-terminal.py', import.meta.url),
+      ),
+    ],
+    { env: f.env, timeout: 30000 },
+  );
+  assert.match(result.stdout, /Skipping GitHub authentication/);
+  const calls = await f.calls();
+  assert.match(calls, /gh auth status --active --hostname git\.example\.com/);
+  assert.doesNotMatch(calls, /gh auth (login|refresh|setup-git)|gh api/);
+  assert.match(
+    calls,
+    /configure --agent claude --github-host git\.example\.com/,
+  );
 });
