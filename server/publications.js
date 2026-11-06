@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { run, githubUrl } from './core.js';
+import { run, githubUrl, getGithubHost } from './core.js';
 const json = async (execute, args) => JSON.parse(await execute('gh', args));
 const git = (task, args, execute) => execute('git', ['-C', task.cwd, ...args]);
 async function pendingReview(task, execute) {
@@ -253,7 +253,7 @@ export async function publishPrepared(task, execute = run) {
       task.pr.headRepositoryOwner?.login + '/' + task.pr.headRepository?.name;
     if (!/^[-\w.]+\/[-\w.]+$/.test(repository))
       throw Error('The PR source repository is unavailable');
-    remote = 'git@github.com:' + repository + '.git';
+    remote = 'git@' + getGithubHost() + ':' + repository + '.git';
   }
   await git(task, ['check-ref-format', '--branch', branch], execute);
   await git(task, ['push', remote, head + ':refs/heads/' + branch], execute);

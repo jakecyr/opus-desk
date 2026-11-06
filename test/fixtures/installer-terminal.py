@@ -12,6 +12,8 @@ if pid == 0:
 
 prompts = [
     (b"Set up GitHub, install/update your agent, and install Opus Desk? [Y/n]", b"\n"),
+    (b"GitHub hostname [", os.fsencode(os.environ.get("FIXTURE_HOST", "")) + b"\n"),
+    (b"Authenticate GitHub CLI with", os.fsencode(os.environ.get("FIXTURE_AUTH_ANSWER", "y")) + b"\n"),
     (b"Choice [1]:", b"2\n"),
     (b"Add Opus Desk to PATH", b"\n"),
     (b"Parent folder containing your Git repositories", os.fsencode(os.environ["HOME"]) + b"\n"),

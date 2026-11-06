@@ -5,8 +5,39 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 const exec = promisify(execFile);
+let githubHost = 'github.com';
+export function setGithubHost(value = 'github.com') {
+  if (
+    typeof value !== 'string' ||
+    !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(
+      value,
+    )
+  )
+    throw Error('Enter a valid GitHub hostname without a protocol or port');
+  githubHost = value.toLowerCase();
+  process.env.GH_HOST = githubHost;
+  return githubHost;
+}
+export function getGithubHost() {
+  return githubHost;
+}
+function remoteRepo(remote) {
+  const escaped = githubHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = remote
+    .trim()
+    .match(
+      new RegExp(
+        `^(?:git@${escaped}:|https://(?:[^@/]+@)?${escaped}/|ssh://git@${escaped}/)([^/]+)/([^/]+?)(?:\\.git)?$`,
+        'i',
+      ),
+    );
+  return match ? `${match[1]}/${match[2]}` : null;
+}
 export async function run(file, args, opts = {}) {
+  if (file === 'gh' && args[0] === 'api' && !args.includes('--hostname'))
+    args = ['api', '--hostname', githubHost, ...args.slice(1)];
   const { stdout } = await exec(file, args, {
+    ...(file === 'gh' ? { cwd: os.tmpdir() } : {}),
     maxBuffer: 16 * 1024 * 1024,
     timeout: 30000,
     ...opts,
@@ -22,7 +53,7 @@ export function githubUrl(value) {
   }
   if (
     parsed.protocol !== 'https:' ||
-    parsed.hostname.toLowerCase() !== 'github.com' ||
+    parsed.hostname.toLowerCase() !== githubHost ||
     parsed.port ||
     parsed.username ||
     parsed.password
@@ -36,7 +67,7 @@ export function githubUrl(value) {
 }
 export function canonicalGithubUrl(value) {
   const { repo, number, kind } = githubUrl(value);
-  return `https://github.com/${repo}/${kind}/${number}`;
+  return `https://${githubHost}/${repo}/${kind}/${number}`;
 }
 
 export function searchText(item, query) {
@@ -69,13 +100,10 @@ export async function projects(root) {
             'get-url',
             'origin',
           ]).catch(() => '');
-          const match = remote
-            .trim()
-            .match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/i);
           out.push({
             name: e.name,
             path: dir,
-            repo: match ? `${match[1]}/${match[2]}` : null,
+            repo: remoteRepo(remote),
           });
         } catch {}
       }),
@@ -228,14 +256,8 @@ export async function configuredProjects(settings) {
       const remote = (
         await run('git', ['-C', directory, 'remote', 'get-url', 'origin'])
       ).trim();
-      const match = remote.match(
-        /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/i,
-      );
-      if (
-        !match ||
-        `${match[1]}/${match[2]}`.toLowerCase() !== repository.toLowerCase()
-      )
-        continue;
+      const match = remoteRepo(remote);
+      if (!match || match.toLowerCase() !== repository.toLowerCase()) continue;
       const item = {
         name: path.basename(directory),
         path: directory,

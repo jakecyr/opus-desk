@@ -27,6 +27,7 @@ import {
   autoCandidates,
   configuredProjects,
   statePath,
+  setGithubHost,
 } from './core.js';
 export async function startServer({
   staticRoot,
@@ -49,6 +50,7 @@ export async function startServer({
   }
   let state = await loadState();
   state.settings = { ...reviewDefaults, ...state.settings };
+  setGithubHost(state.settings.githubHost || 'github.com');
   if (!state.settings.permissionMigrated) {
     if (state.settings.permission === 'sandbox')
       state.settings.permission = 'danger';
@@ -1444,6 +1446,12 @@ export async function startServer({
             throw Error('Repository folders must be absolute paths');
         }
       }
+      if ('githubHost' in req.body) {
+        setGithubHost(req.body.githubHost || 'github.com');
+        req.body.githubHost = process.env.GH_HOST;
+        detectedUsername = null;
+        cache = { prs: [], issues: [], errors: [], updated: null };
+      }
       const allowed = [
         'root',
         'interval',
@@ -1454,6 +1462,7 @@ export async function startServer({
         'permission',
         'workflows',
         'githubUsername',
+        'githubHost',
         'repoPaths',
         'sprintRepo',
         'sprintProjectId',

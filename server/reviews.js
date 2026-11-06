@@ -1,4 +1,4 @@
-import { canonicalGithubUrl, githubUrl, run } from './core.js';
+import { canonicalGithubUrl, githubUrl, run, getGithubHost } from './core.js';
 
 export function linkedIssueUrls(pr, repository, discussion = []) {
   const urls = new Set();
@@ -12,15 +12,17 @@ export function linkedIssueUrls(pr, repository, discussion = []) {
     '\n',
   );
   for (const match of text.matchAll(
-    /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/issues\/\d+/gi,
+    /https:\/\/[\w.-]+\/[\w.-]+\/[\w.-]+\/issues\/\d+/gi,
   )) {
-    urls.add(canonicalGithubUrl(match[0]));
+    try {
+      urls.add(canonicalGithubUrl(match[0]));
+    } catch {}
   }
   for (const match of text.matchAll(
     /(?:^|[\s(])(?:([\w.-]+\/[\w.-]+))?#(\d+)\b/g,
   )) {
     urls.add(
-      `https://github.com/${match[1] || repository}/issues/${Number(match[2])}`,
+      `https://${getGithubHost()}/${match[1] || repository}/issues/${Number(match[2])}`,
     );
   }
   return [...urls];

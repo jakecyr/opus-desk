@@ -8,7 +8,7 @@ curl -fsSL https://github.com/jakecyr/opus-desk/releases/latest/download/install
 
 The script uses `/dev/tty` for questions, even when piped to Bash. It asks before setting up dependencies, installing/updating the selected agent, and starting the daemon. Homebrew's own installer may ask for administrator access. Opus Desk itself installs to `~/.local/bin` without sudo. If needed, it offers to add the binary directory to your Bash or Zsh profile. Other shells receive a PATH instruction.
 
-GitHub CLI signs in through its browser flow. OAuth scopes `repo`, `read:org`, `workflow`, and `read:project` cover repository workflows, organization visibility, and agent fixes to GitHub Actions files, and read access to GitHub Projects. Missing scopes prompt `gh auth refresh`. Tokens supplied through `GH_TOKEN`/`GITHUB_TOKEN` cannot be refreshed interactively; unset them and rerun setup. Fine-grained token permissions cannot be inferred from OAuth scope headers, so the installer asks for a verifiable CLI OAuth login instead of claiming to validate them. Organization SSO, repository access, and protected branch rules still apply.
+Choose a GitHub hostname during setup (default `github.com`), or set `OPUSDESK_GITHUB_HOST` for unattended setup. GitHub CLI signs in through its browser flow when you accept the authentication prompt; declining skips sign-in and GitHub features remain unavailable until you authenticate. Change the host later in Settings or with `opus-desk configure --github-host HOST`. OAuth scopes `repo`, `read:org`, `workflow`, and `read:project` cover repository workflows, organization visibility, and agent fixes to GitHub Actions files, and read access to GitHub Projects. Missing scopes prompt `gh auth refresh`. Tokens supplied through `GH_TOKEN`/`GITHUB_TOKEN` cannot be refreshed interactively; unset them and rerun setup. Fine-grained token permissions cannot be inferred from OAuth scope headers, so the installer asks for a verifiable CLI OAuth login instead of claiming to validate them. Organization SSO, repository access, and protected branch rules still apply.
 
 The selected agent is installed or updated using the official native latest-release installer and its version is printed. Existing versions installed by another package manager are retained; `~/.local/bin` takes precedence for this setup. The installer checks `codex login status` or `claude auth status`, opens the appropriate login flow if needed, and checks again. It never runs a paid test prompt or writes provider credentials itself.
 
@@ -38,6 +38,7 @@ OPUSDESK_NONINTERACTIVE=1 OPUSDESK_AGENT=codex bash install.sh
 | ------------------------- | ----------------------------------------------------------- |
 | `OPUSDESK_AGENT`          | `codex` or `claude`                                         |
 | `OPUSDESK_VERSION`        | A stable `vX.Y.Z` tag; default `latest`                     |
+| `OPUSDESK_GITHUB_HOST`    | GitHub hostname; default `github.com`                       |
 | `OPUSDESK_INSTALL_DIR`    | Destination; default `~/.local/bin`                         |
 | `OPUSDESK_PROJECTS_DIR`   | Existing parent folder containing Git repositories          |
 | `OPUSDESK_NONINTERACTIVE` | `1` validates preconfigured dependencies and authentication |
@@ -63,7 +64,7 @@ opus-desk configure --agent claude --projects "$HOME/Projects"
 
 ## Updates and removal
 
-Rerun the installer for updates, then run `opus-desk restart` to switch an already running daemon to the new binary. State is preserved. The daemon survives a closed terminal; it does not restart at login or after a reboot, and it is not a supervised service.
+Run `opus-desk update` or rerun the installer for updates, then run `opus-desk restart` to switch an already running daemon to the new binary. State is preserved. The daemon survives a closed terminal; it does not restart at login or after a reboot, and it is not a supervised service.
 
 For removal, run `opus-desk stop` and remove `~/.local/bin/opus-desk` (or your custom installation path). State, logs, and retained worktrees are under `~/.local/share/prquay`; inspect them before deleting. GitHub CLI, agents, and Homebrew are managed independently and are left installed.
 
