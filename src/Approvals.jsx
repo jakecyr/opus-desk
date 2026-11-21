@@ -133,16 +133,32 @@ export function ApprovalPreview({
                   ? 'Open the chat to inspect the result. Refresh it here when the work is ready.'
                   : task.type === 'review'
                     ? 'Publishes this pending review as comments, without approving or requesting changes. The entire pending review below will be submitted, including any drafts you added.'
-                    : task.type === 'description'
-                      ? 'Updates the issue only if its description is still empty.'
-                      : task.metadata
-                        ? 'Pushes these commits and creates the PR shown below.'
-                        : 'Pushes these local commits to the PR branch.'}
+                    : task.type === 'review-artifact'
+                      ? 'Submits the comments shown below to GitHub.'
+                      : task.type === 'description'
+                        ? 'Updates the issue only if its description is still empty.'
+                        : task.metadata
+                          ? 'Pushes these commits and creates the PR shown below.'
+                          : 'Pushes these local commits to the PR branch.'}
               </p>
               {task.summary && (
                 <pre className="publication-text">{task.summary}</pre>
               )}
               {task.body && <pre className="publication-text">{task.body}</pre>}
+              {Array.isArray(task.checks) && (
+                <>
+                  <p className="muted">
+                    {task.tested
+                      ? 'Local checks passed'
+                      : 'Local checks incomplete'}
+                  </p>
+                  {!!task.checks.length && (
+                    <pre className="publication-text">
+                      {task.checks.join('\n')}
+                    </pre>
+                  )}
+                </>
+              )}
               {task.comments?.map((c, i) => (
                 <div className="draft-comment" key={i}>
                   <b>

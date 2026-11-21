@@ -1,13 +1,29 @@
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { run, githubUrl, getGithubHost } from './core.js';
+import os from 'node:os';
+import { run, githubUrl, getGithubHost, canonicalGithubUrl } from './core.js';
+import { readReviewArtifact } from './reviews.js';
+import { enrichPullBatch } from './pulls.js';
+const hostFor = (task) => task.githubHost || getGithubHost();
+const targetFor = (task) => githubUrl(task.url, hostFor(task));
+function executorFor(task, execute) {
+  if (execute !== run) return execute;
+  const host = hostFor(task);
+  return (file, args) => {
+    if (file !== 'gh') return run(file, args);
+    if (args[0] === 'api') args = ['api', '--hostname', host, ...args.slice(1)];
+    return run(file, args, { env: { ...process.env, GH_HOST: host } });
+  };
+}
 const json = async (execute, args) => JSON.parse(await execute('gh', args));
 const git = (task, args, execute) => execute('git', ['-C', task.cwd, ...args]);
 async function pendingReview(task, execute) {
-  const target = githubUrl(task.url);
+  const target = targetFor(task);
   const viewer = await json(execute, ['api', 'user']);
   if (!viewer.login) throw Error('Could not identify the GitHub user');
+  if (task.auto && task.viewer?.toLowerCase() !== viewer.login.toLowerCase())
+    throw Error('The authenticated GitHub account changed');
   const pages = await json(execute, [
     'api',
     '--paginate',
@@ -27,7 +43,21 @@ async function pendingReview(task, execute) {
     );
 }
 export async function collectPublication(task, execute = run) {
-  const target = githubUrl(task.url);
+  const target = targetFor(task);
+  execute = executorFor(task, execute);
+  if (task.kind === 'review' && task.localReview) {
+    const review = await readReviewArtifact(task.artifact);
+    if (!review.comments.length)
+      return { status: 'complete', note: 'No actionable findings' };
+    return {
+      ...review,
+      status: 'pending',
+      type: 'review-artifact',
+      title: 'Publish review',
+      summary: review.comments.length + ' draft comments',
+      head: task.initialHead,
+    };
+  }
   if (task.kind === 'review') {
     const review = await pendingReview(task, execute);
     if (!review)
@@ -118,6 +148,8 @@ export async function collectPublication(task, execute = run) {
       '--json',
       'headRefName,headRefOid,headRepository,headRepositoryOwner,title',
     ]);
+    if (task.auto && pr.headRefOid !== task.initialHead)
+      throw Error('The PR acquired new commits while this work was running');
     await git(
       task,
       ['merge-base', '--is-ancestor', pr.headRefOid, head],
@@ -157,10 +189,17 @@ export async function collectPublication(task, execute = run) {
     diffTruncated: diff.length > 200000,
   };
 }
-export async function publishPrepared(task, execute = run) {
-  const target = githubUrl(task.url);
+export async function publishPrepared(
+  task,
+  execute = run,
+  authorize = () => true,
+) {
+  const target = targetFor(task);
+  execute = executorFor(task, execute);
   if (task.status !== 'pending')
     throw Error('This task is not waiting for publishing approval');
+  if (task.type === 'review-artifact')
+    return materializeReview(task, 'publish', execute, authorize);
   if (task.type === 'review') {
     const review = await pendingReview(task, execute);
     const fresh = await collectPublication(task, execute);
@@ -169,10 +208,12 @@ export async function publishPrepared(task, execute = run) {
       'view',
       task.url,
       '--json',
-      'headRefOid',
+      'headRefOid,state,isDraft',
     ]);
     if (
       !review ||
+      (pr.state && pr.state !== 'OPEN') ||
+      pr.isDraft ||
       review.id !== task.reviewId ||
       review.commit_id !== task.head ||
       pr.headRefOid !== task.head ||
@@ -232,14 +273,24 @@ export async function publishPrepared(task, execute = run) {
   let remote = 'origin',
     branch = task.branch;
   if (task.pr) {
-    const current = await json(execute, [
-      'pr',
-      'view',
-      task.url,
-      '--json',
-      'headRefOid',
-    ]);
-    if (current.headRefOid !== task.pr.headRefOid)
+    const current = task.auto
+      ? (await enrichPullBatch([{ url: task.url }], execute))[0]
+      : await json(execute, ['pr', 'view', task.url, '--json', 'headRefOid']);
+    if (
+      current.headRefOid !== task.pr.headRefOid ||
+      (task.auto &&
+        (!current.statusReady ||
+          current.state !== 'OPEN' ||
+          current.isDraft ||
+          current.viewer?.toLowerCase() !== task.viewer?.toLowerCase() ||
+          !current.roles.includes('authored') ||
+          (task.kind === 'conflicts' &&
+            (current.baseRefOid !== task.base ||
+              current.mergeable !== 'CONFLICTING')) ||
+          (task.kind === 'ci' && current.checkState !== 'FAILURE') ||
+          (task.kind === 'comments' &&
+            current.feedbackFingerprint !== task.signal)))
+    )
       throw Error(
         'The PR has new commits. Re-run the agent before publishing.',
       );
@@ -253,10 +304,25 @@ export async function publishPrepared(task, execute = run) {
       task.pr.headRepositoryOwner?.login + '/' + task.pr.headRepository?.name;
     if (!/^[-\w.]+\/[-\w.]+$/.test(repository))
       throw Error('The PR source repository is unavailable');
-    remote = 'git@' + getGithubHost() + ':' + repository + '.git';
+    remote = task.auto
+      ? 'https://' + hostFor(task) + '/' + repository + '.git'
+      : 'git@' + hostFor(task) + ':' + repository + '.git';
   }
   await git(task, ['check-ref-format', '--branch', branch], execute);
-  await git(task, ['push', remote, head + ':refs/heads/' + branch], execute);
+  if (!authorize()) throw Error('Automatic publication settings changed');
+  const credentials = task.auto
+    ? [
+        '-c',
+        'credential.helper=',
+        '-c',
+        'credential.helper=!gh auth git-credential',
+      ]
+    : [];
+  await git(
+    task,
+    [...credentials, 'push', remote, head + ':refs/heads/' + branch],
+    execute,
+  );
   if (!task.metadata) return { url: task.url };
   const existing = await json(execute, [
     'pr',
@@ -287,4 +353,110 @@ export async function publishPrepared(task, execute = run) {
   ];
   if (task.metadata.base) args.push('--base', task.metadata.base);
   return { url: (await execute('gh', args)).trim() };
+}
+
+export async function materializeReview(
+  task,
+  mode,
+  execute = run,
+  authorize = () => true,
+) {
+  const { repo, number } = targetFor(task);
+  execute = executorFor(task, execute);
+  if (
+    task.status !== 'pending' ||
+    !['draft', 'publish'].includes(mode) ||
+    task.type !== 'review-artifact' ||
+    (!task.comments?.length &&
+      !(mode === 'publish' && !task.auto && task.body?.trim()))
+  )
+    throw Error('No prepared review comments');
+  const [pr, existing] = await Promise.all([
+    json(execute, [
+      'pr',
+      'view',
+      task.url,
+      '--json',
+      'headRefOid,state,isDraft,author',
+    ]),
+    pendingReview(task, execute),
+  ]);
+  if (pr.state !== 'OPEN' || pr.isDraft || pr.headRefOid !== task.head)
+    throw Error('The PR changed. Prepare a fresh review.');
+  if (
+    task.auto &&
+    (!task.viewer ||
+      !pr.author?.login ||
+      pr.author.login.toLowerCase() === task.viewer.toLowerCase())
+  )
+    throw Error(
+      'Automatic reviews require a pull request authored by someone else',
+    );
+  if (existing)
+    throw Error(
+      'A pending GitHub review exists. Finish it before publishing this draft.',
+    );
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opusdesk-review-'));
+  try {
+    const file = path.join(dir, 'review.json');
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        commit_id: task.head,
+        body: task.body,
+        comments: task.comments,
+        ...(mode === 'publish' ? { event: 'COMMENT' } : {}),
+      }),
+      { mode: 0o600 },
+    );
+    if (!authorize()) throw Error('Automatic publication settings changed');
+    const review = await json(execute, [
+      'api',
+      '--method',
+      'POST',
+      `repos/${repo}/pulls/${number}/reviews`,
+      '--input',
+      file,
+    ]);
+    return { url: task.url, reviewId: review.id };
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+export async function submitPendingReview(value, expectedHead, execute = run) {
+  const url = canonicalGithubUrl(value);
+  if (githubUrl(url).kind !== 'pull')
+    throw Error('Expected a pull request URL');
+  const draft = await collectPublication({ url, kind: 'review' }, execute);
+  if (!expectedHead || draft.head !== expectedHead)
+    throw Error(
+      'No pending GitHub review on this revision. Refresh and check the review.',
+    );
+  return publishPrepared({ ...draft, url, kind: 'review' }, execute);
+}
+
+export async function submitReviewText(
+  value,
+  expectedHead,
+  body,
+  execute = run,
+) {
+  const url = canonicalGithubUrl(value);
+  if (githubUrl(url).kind !== 'pull' || !expectedHead)
+    throw Error('Select a pull request and refresh its revision');
+  if (typeof body !== 'string' || !body.trim() || body.length > 10000)
+    throw Error('Enter review feedback of at most 10,000 characters');
+  return materializeReview(
+    {
+      url,
+      type: 'review-artifact',
+      status: 'pending',
+      head: expectedHead,
+      body: body.trim(),
+      comments: [],
+    },
+    'publish',
+    execute,
+  );
 }

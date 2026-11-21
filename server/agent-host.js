@@ -11,6 +11,7 @@ import { Codex } from './codex.js';
 import { runClaude } from './claude.js';
 import { statePath } from './core.js';
 import { collectPublication, publishPrepared } from './publications.js';
+import { collectAutomaticFix } from './auto-checkout.js';
 
 const directory = path.join(path.dirname(statePath), 'agents');
 const socketPath = path.join(
@@ -18,6 +19,7 @@ const socketPath = path.join(
   `opusdesk-${process.getuid?.() || 0}-${createHash('sha256').update(directory).digest('hex').slice(0, 16)}.sock`,
 );
 const recordPath = path.join(directory, 'host.json');
+const hostProtocol = 2;
 
 // The host owns the CLI pipes, so closing the dashboard cannot close agent stdin.
 export async function startAgentHost() {
@@ -26,6 +28,8 @@ export async function startAgentHost() {
     clients = new Set(),
     active = new Set(),
     completed = new Map();
+  const codexTurns = new Map();
+  const claudeRuns = new Map();
   const tasks = {};
   const write = (socket, message) => {
     if (!socket.destroyed) socket.write(JSON.stringify(message) + '\n');
@@ -42,8 +46,12 @@ export async function startAgentHost() {
           },
         });
     }
+    if (event.method === 'turn/started' && active.has(event.params.threadId))
+      codexTurns.set(event.params.threadId, event.params.turn.id);
     if (event.method === 'turn/completed') {
       active.delete(event.params.threadId);
+      codexTurns.delete(event.params.threadId);
+      claudeRuns.delete(event.params.threadId);
       completed.set(event.params.threadId, event);
       if (completed.size > 1000)
         completed.delete(completed.keys().next().value);
@@ -68,6 +76,8 @@ export async function startAgentHost() {
       const status = event.params.turn?.status || event.params.status;
       if (status !== 'completed')
         throw Error(event.params.error || 'Agent did not finish');
+      if (task.auto && task.kind !== 'review')
+        Object.assign(task, await collectAutomaticFix(task));
       Object.assign(task, await collectPublication(task));
       if (
         task.kind === 'ci' &&
@@ -101,6 +111,7 @@ export async function startAgentHost() {
         let result;
         if (method === 'host/snapshot')
           result = {
+            protocol: hostProtocol,
             active: [...active],
             completed: [...completed.values()],
             tasks,
@@ -120,8 +131,31 @@ export async function startAgentHost() {
             throw Error('This chat already has an active turn');
           active.add(id);
           completed.delete(id);
-          runClaude(params, emit);
+          try {
+            claudeRuns.set(id, await runClaude(params, emit));
+          } catch (error) {
+            active.delete(id);
+            throw error;
+          }
           result = { id };
+        } else if (method === 'host/steer' || method === 'host/interrupt') {
+          const { threadId, input } = params;
+          const claude = claudeRuns.get(threadId);
+          if (method === 'host/interrupt' && claude) {
+            await claude.stop();
+            result = {};
+          } else {
+            const turnId = codexTurns.get(threadId);
+            if (!turnId) throw Error('This chat has no active turn to control');
+            result =
+              method === 'host/steer'
+                ? await codex.call('turn/steer', {
+                    threadId,
+                    input,
+                    expectedTurnId: turnId,
+                  })
+                : await codex.call('turn/interrupt', { threadId, turnId });
+          }
         } else {
           await codex.start();
           if (method === 'turn/start') {
@@ -132,6 +166,12 @@ export async function startAgentHost() {
           }
           try {
             result = await codex.call(method, params);
+            if (
+              method === 'turn/start' &&
+              active.has(params.threadId) &&
+              result?.turn?.id
+            )
+              codexTurns.set(params.threadId, result.turn.id);
           } catch (error) {
             if (method === 'turn/start') active.delete(params.threadId);
             throw error;
@@ -296,6 +336,8 @@ export class AgentClient extends EventEmitter {
           this.requests.set(String(event.id), event);
         if (event.method === 'turn/completed')
           this.active.delete(event.params.threadId);
+        if (event.method === 'turn/started')
+          this.active.add(event.params.threadId);
         this.emit('event', event);
       } else {
         const request = this.pending.get(message.id);
@@ -307,6 +349,7 @@ export class AgentClient extends EventEmitter {
       }
     });
     const snapshot = await this.request('host/snapshot');
+    this.protocol = snapshot.protocol;
     this.active = new Set(snapshot.active);
     this.requests = new Map(snapshot.requests.map((r) => [String(r.id), r]));
     this.emit('snapshot', snapshot);
@@ -320,11 +363,19 @@ export class AgentClient extends EventEmitter {
   }
   async call(method, params) {
     await this.start();
+    if (
+      method === 'host/steer' ||
+      method === 'host/interrupt' ||
+      (method === 'host/register' && (params.auto || params.localReview))
+    )
+      this.assertUpdatedHost();
+    const wasActive = this.active.has(params?.threadId);
     if (method === 'turn/start') this.active.add(params.threadId);
     try {
       return await this.request(method, params);
     } catch (error) {
-      if (method === 'turn/start') this.active.delete(params.threadId);
+      if (method === 'turn/start' && !wasActive)
+        this.active.delete(params.threadId);
       throw error;
     }
   }
@@ -332,15 +383,27 @@ export class AgentClient extends EventEmitter {
     await this.call('host/respond', { id, result });
     this.requests.delete(String(id));
   }
+  assertUpdatedHost() {
+    if (!this.protocol || this.protocol < hostProtocol)
+      throw Error(
+        'Opus Desk is connected to an older agent host. Restart the agent host after its jobs finish.',
+      );
+  }
+  async requireAutomation() {
+    await this.start();
+    this.assertUpdatedHost();
+  }
   async runClaude(options) {
     await this.start();
+    if (options.automated) this.assertUpdatedHost();
     const id = 'claude:' + options.id;
+    const wasActive = this.active.has(id);
     this.active.add(id);
     try {
       const result = await this.request('host/claude', options);
       return result.id;
     } catch (error) {
-      this.active.delete(id);
+      if (!wasActive) this.active.delete(id);
       throw error;
     }
   }

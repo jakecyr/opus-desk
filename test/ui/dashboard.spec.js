@@ -38,9 +38,7 @@ test('empty dashboard, navigation, and theme work without Codex', async ({
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/');
   await expect(page.getByText('Opus Desk', { exact: true })).toBeVisible();
-  await expect(
-    page.getByText("You're all caught up on review requests."),
-  ).toBeVisible();
+  await expect(page.getByText('Nothing needs your attention.')).toBeVisible();
   await page.getByRole('button', { name: 'Issues', exact: true }).click();
   await expect(page).toHaveURL(/\/issues$/);
   await expect(
@@ -139,15 +137,17 @@ test('PR actions stay on the page, show progress and chat links, and block dupli
   expect((await request).postDataJSON()).toEqual({
     url,
     kind: 'ci',
-    pushOnCompletion: true,
   });
   await expect(page).toHaveURL(/\/pull-requests$/);
   const broken = page.locator('.pr-row').filter({ hasText: 'Broken CI' });
   await expect(broken.getByRole('status')).toHaveText('Fixing CI');
-  for (const name of ['Fix CI', 'Review', 'Address comments'])
+  for (const name of ['Fix CI', 'Review'])
     await expect(
       broken.getByRole('button', { name, exact: true }),
     ).toBeDisabled();
+  await expect(
+    broken.getByRole('button', { name: 'Address comments' }),
+  ).toHaveCount(0);
   await expect(
     broken.getByRole('link', { name: 'Chat', exact: true }),
   ).toHaveAttribute('href', '/sessions/claude%3Aexisting-pr-chat');

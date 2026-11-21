@@ -5,7 +5,14 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { localOptions, acceptsHost } from './local.js';
 import { AgentClient } from './agent-host.js';
-import { collectPublication, publishPrepared } from './publications.js';
+import {
+  collectPublication,
+  publishPrepared,
+  submitPendingReview,
+  submitReviewText,
+  materializeReview,
+} from './publications.js';
+import { enrichPullBatch, loadPullDetail, mergePull } from './pulls.js';
 import { modelCatalog } from './models.js';
 import {
   loadSprint,
@@ -14,9 +21,22 @@ import {
   repoName,
 } from './sprint.js';
 import { loadReviewContext, loadReviewState } from './reviews.js';
-import { reviewDefaults, validateReviewSettings } from './review-policy.js';
+import {
+  getAutoActionMode,
+  reviewDefaults,
+  validateReviewSettings,
+} from './review-policy.js';
+import { automaticEffect } from './automation.js';
+import { prepareAutomaticCheckout } from './auto-checkout.js';
 import { externalUse } from './ownership.js';
 import { listClaude, claudeThread } from './claude.js';
+import {
+  createSessionSearch,
+  listCodexSessions,
+  mergeSessions,
+  sessionDirectory,
+  sessionModelOptions,
+} from './sessions.js';
 import {
   run,
   githubUrl,
@@ -28,6 +48,7 @@ import {
   configuredProjects,
   statePath,
   setGithubHost,
+  getGithubHost,
 } from './core.js';
 export async function startServer({
   staticRoot,
@@ -59,56 +80,62 @@ export async function startServer({
   }
   state.autoEnabled = state.autoEnabled === true;
   state.drafts ??= {};
+  state.sessionOptions ??= {};
   state.preparations ??= {};
   state.settings.publishReviews = false;
+  state.trackedPulls ??= [];
+  function normalizeGithubBindings() {
+    const canonical = (value) => {
+      try {
+        return canonicalGithubUrl(value);
+      } catch {
+        return value;
+      }
+    };
+    state.links = Object.fromEntries(
+      Object.entries(state.links || {}).map(([url, id]) => [
+        canonical(url),
+        id,
+      ]),
+    );
+    state.trackedPulls = [...new Set(state.trackedPulls.map(canonical))];
+  }
+  normalizeGithubBindings();
   let cache = { prs: [], issues: [], errors: [], updated: null };
-  let polling = false;
+  let polling;
+  let githubGeneration = 0;
   let timer;
   const clients = new Set();
   const cleanupJobs = new Map();
   const pendingClaude = new Map();
   let autoBusy = false;
-  let autoThread = null;
-  const recentCompletions = new Map();
+  let runAutoAgain = false;
   function broadcast(event) {
     if (event.method === 'preparation/updated') {
       const task = event.params.task;
-      state.preparations[task.key] = task;
-      void saveState(state);
-      event = { method: 'approvals/updated', params: { key: task.key } };
+      const previous = state.preparations[task.key];
       if (
-        ['published', 'pending', 'complete', 'failed'].includes(task.status)
+        !previous?.automaticEffect &&
+        !['published', 'dismissed'].includes(previous?.status)
       ) {
-        void scheduleAuto();
-        if (task.status === 'published') void poll();
+        state.preparations[task.key] = task;
+        updateAutoRecord(task);
+        void saveState(state);
+        if (
+          ['published', 'pending', 'complete', 'failed'].includes(task.status)
+        ) {
+          requestAuto();
+          if (task.status === 'published') void poll();
+        }
       }
+      event = { method: 'approvals/updated', params: { key: task.key } };
     }
-    if (event.method === 'turn/completed')
+    if (event.method === 'turn/completed') {
+      if (event.params?.threadId?.startsWith('claude:'))
+        pendingClaude.delete(event.params.threadId);
       void finishPreparation(event).catch((e) =>
         broadcast({ method: 'approvals/error', params: { error: e.message } }),
       );
-    if (event.method === 'turn/completed' && event.params?.threadId) {
-      if (event.params.threadId.startsWith('claude:'))
-        pendingClaude.delete(event.params.threadId);
-      recentCompletions.set(event.params.threadId, event);
-      if (recentCompletions.size > 100)
-        recentCompletions.delete(recentCompletions.keys().next().value);
-    }
-    if (
-      event.method === 'turn/completed' &&
-      event.params?.threadId === autoThread
-    ) {
-      const key = Object.keys(state.autoRuns || {}).find(
-        (k) => state.autoRuns[k].id === autoThread,
-      );
-      if (key) {
-        state.autoRuns[key].status =
-          event.params?.turn?.status || event.params?.status || 'completed';
-        void saveState(state);
-      }
-      autoThread = null;
-      autoBusy = false;
-      setTimeout(scheduleAuto, 0);
     }
     for (const c of clients) c.write(`data: ${JSON.stringify(event)}\n\n`);
   }
@@ -118,9 +145,12 @@ export async function startServer({
       const local = state.preparations[task.key];
       if (
         !local ||
-        ['running', 'collecting', 'publishing'].includes(local.status)
-      )
+        (!local.automaticEffect &&
+          ['running', 'collecting', 'publishing'].includes(local.status))
+      ) {
         state.preparations[task.key] = task;
+        updateAutoRecord(task);
+      }
       if (task.id.startsWith('claude:') && snapshot.active.includes(task.id))
         pendingClaude.set(task.id, {
           id: task.id,
@@ -133,6 +163,7 @@ export async function startServer({
         });
     }
     void saveState(state);
+    requestAuto();
   });
   app.use((req, res, next) => {
     if (!acceptsHost(req.headers.host, hostname, port))
@@ -166,9 +197,31 @@ export async function startServer({
       ]),
     );
   }
-  async function poll() {
-    if (polling) return;
-    polling = true;
+  function poll() {
+    if (polling) return polling;
+    const generation = githubGeneration;
+    polling = syncGithub(generation)
+      .catch((error) => {
+        if (generation === githubGeneration) {
+          cache = {
+            ...cache,
+            errors: [error.message],
+            prs: cache.prs.map((pr) => ({ ...pr, statusReady: false })),
+          };
+          broadcast({
+            method: 'github/updated',
+            params: { updated: cache.updated },
+          });
+        }
+      })
+      .finally(() => {
+        polling = null;
+        if (generation !== githubGeneration) void poll();
+        else requestAuto();
+      });
+    return polling;
+  }
+  async function syncGithub(generation) {
     const qs = [
       ['authored', () => search('prs', ['--author', '@me', '--state', 'open'])],
       [
@@ -241,56 +294,127 @@ export async function startServer({
       ],
     ];
     const results = await Promise.allSettled(qs.map(([, f]) => f()));
+    if (generation !== githubGeneration) return;
     const old = cache;
     const prs = new Map();
-    let issues = old.issues,
-      errors = [];
+    let issues = old.issues;
+    const errors = [];
     results.forEach((r, i) => {
+      const name = qs[i][0];
       if (r.status === 'rejected') {
-        errors.push(`${qs[i][0]}: ${r.reason.message}`);
+        errors.push(name + ': ' + r.reason.message);
         return;
       }
-      if (qs[i][0] === 'issues') {
+      if (name === 'issues') {
         issues = r.value;
         return;
       }
       for (const x of r.value) {
-        const prior = prs.get(x.url) || old.prs.find((y) => y.url === x.url);
-        prs.set(x.url, {
+        let url;
+        try {
+          url = canonicalGithubUrl(x.url);
+        } catch {
+          continue;
+        }
+        const prior = prs.get(url);
+        prs.set(url, {
           ...prior,
           ...x,
-          roles: [...new Set([...(prs.get(x.url)?.roles || []), qs[i][0]])],
+          url,
+          roles: [...(prior?.roles || []), name],
         });
       }
     });
-    if (prs.size === 0 && errors.length) cache = { ...old, errors };
-    else
-      cache = {
-        prs: [...prs.values()].sort((a, b) =>
-          b.updatedAt.localeCompare(a.updatedAt),
-        ),
-        issues,
-        errors,
-        updated: new Date().toISOString(),
-      };
-    if (old.updated) {
-      const oldSet = new Set(
-        old.prs.filter((x) => x.roles.includes('review')).map((x) => x.url),
-      );
-      for (const pr of cache.prs.filter(
-        (x) => x.roles.includes('review') && !oldSet.has(x.url),
-      ))
-        broadcast({
-          method: 'pr/reviewRequested',
-          params: { title: pr.title, url: pr.url },
-        });
+    const criticalSearchFailed = results
+      .slice(0, 6)
+      .some((r) => r.status === 'rejected');
+    const tracked = state.trackedPulls.flatMap((url) => {
+      try {
+        return !prs.has(url) && canonicalGithubUrl(url) === url ? [url] : [];
+      } catch {
+        return [];
+      }
+    });
+    for (const url of tracked) {
+      const oldItem = old.prs.find((pr) => pr.url === url);
+      prs.set(url, { ...oldItem, url, roles: ['tracked'] });
     }
-    polling = false;
+    if (criticalSearchFailed) {
+      for (const item of old.prs) {
+        if (!prs.has(item.url))
+          prs.set(item.url, { ...item, statusReady: false });
+      }
+    }
+    const candidates = [...prs.values()];
+    const synced = [];
+    for (let start = 0; start < candidates.length; start += 8) {
+      if (generation !== githubGeneration) return;
+      const batch = candidates.slice(start, start + 8);
+      try {
+        synced.push(...(await enrichPullBatch(batch)));
+      } catch (e) {
+        if (!errors.some((error) => error.startsWith('PR status:'))) {
+          errors.push(
+            'PR status: ' + (e.stderr?.trim().split('\n')[0] || e.message),
+          );
+        }
+        synced.push(...batch.map((item) => ({ ...item, statusReady: false })));
+      }
+    }
+    if (generation !== githubGeneration) return;
+    const closedTracked = new Set(
+      synced
+        .filter((item) => item.statusReady && item.state !== 'OPEN')
+        .map((item) => item.url),
+    );
+    if (state.trackedPulls.some((url) => closedTracked.has(url))) {
+      state.trackedPulls = state.trackedPulls.filter(
+        (url) => !closedTracked.has(url),
+      );
+      void saveState(state);
+    }
+    const result = await Promise.allSettled(
+      synced
+        .filter((item) => !item.title && item.state === 'OPEN')
+        .map((item) => getPullDetail(item.url, item.roles)),
+    );
+    if (generation !== githubGeneration) return;
+    const details = new Map(
+      result.flatMap((r) =>
+        r.status === 'fulfilled' ? [[r.value.url, r.value]] : [],
+      ),
+    );
+    const current = synced
+      .map((item) => details.get(item.url) || item)
+      .filter((item) => item.title && (!item.state || item.state === 'OPEN'))
+      .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+    cache = { prs: current, issues, errors, updated: new Date().toISOString() };
+    if (old.updated) {
+      const previous = new Map(old.prs.map((pr) => [pr.url, pr]));
+      for (const pr of current) {
+        const before = previous.get(pr.url);
+        if (pr.roles.includes('review') && !before?.roles.includes('review'))
+          broadcast({
+            method: 'pr/reviewRequested',
+            params: { title: pr.title, url: pr.url },
+          });
+        if (
+          before?.checkState &&
+          before.checkState !== 'FAILURE' &&
+          pr.checkState === 'FAILURE'
+        )
+          broadcast({
+            method: 'pr/checkFailed',
+            params: { title: pr.title, url: pr.url },
+          });
+      }
+    }
     broadcast({ method: 'github/updated', params: { updated: cache.updated } });
-    void enrichPulls(cache.prs);
+    const snapshot = cache;
     void currentUsername()
-      .then((u) => enrichIssues(cache.issues, u))
+      .then((u) => enrichIssues(issues, u))
       .then((items) => {
+        if (cache !== snapshot) return;
         cache.issues = items;
         broadcast({
           method: 'github/updated',
@@ -298,120 +422,6 @@ export async function startServer({
         });
       })
       .catch(() => {});
-  }
-  async function enrichPulls(items) {
-    const eligible = items
-      .filter((x) =>
-        /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+\/?$/.test(x.url),
-      )
-      .slice(0, 100);
-    if (!eligible.length) {
-      void scheduleAuto();
-      return;
-    }
-    const fields = eligible
-      .map((x, i) => {
-        const { repo, number } = githubUrl(x.url);
-        const [owner, name] = repo.split('/');
-        return `p${i}:repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){pullRequest(number:${number}){mergeable reviewDecision headRefOid baseRefOid reviewThreads(first:100){nodes{id isResolved comments(last:1){nodes{createdAt author{login}}}}} reviews(last:100){nodes{author{login}state commit{oid}}} commits(last:1){nodes{commit{statusCheckRollup{state contexts(first:100){nodes{... on CheckRun{name conclusion} ... on StatusContext{context state}}}}}}}}}`;
-      })
-      .join(' ');
-    try {
-      const result = JSON.parse(
-        await run('gh', [
-          'api',
-          'graphql',
-          '-f',
-          `query=query { viewer { login } ${fields} }`,
-        ]),
-      );
-      for (let i = 0; i < eligible.length; i++) {
-        const p = result.data?.[`p${i}`]?.pullRequest;
-        if (!p) continue;
-        const x = cache.prs.find((y) => y.url === eligible[i].url);
-        if (!x) continue;
-        const previousCheck = x.checkState;
-        x.mergeable = p.mergeable;
-        x.reviewDecision = p.reviewDecision;
-        x.headRefOid = p.headRefOid;
-        x.baseRefOid = p.baseRefOid;
-        x.feedbackFingerprint = (p.reviewThreads?.nodes || [])
-          .filter(
-            (t) =>
-              !t.isResolved &&
-              t.comments?.nodes?.[0]?.author?.login &&
-              t.comments.nodes[0].author.login !== result.data?.viewer?.login,
-          )
-          .map((t) => `${t.id}:${t.comments.nodes[0].createdAt}`)
-          .sort()
-          .join('|');
-        x.failedChecks = (
-          p.commits?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ||
-          []
-        )
-          .filter((c) =>
-            [
-              'FAILURE',
-              'ERROR',
-              'TIMED_OUT',
-              'ACTION_REQUIRED',
-              'CANCELLED',
-            ].includes(c.conclusion || c.state),
-          )
-          .map((c) => c.name || c.context)
-          .filter(Boolean);
-        x.pendingReview =
-          p.reviews?.nodes?.some(
-            (r) =>
-              r.author?.login === result.data?.viewer?.login &&
-              r.state === 'PENDING',
-          ) || false;
-        x.reviewedByMe =
-          p.reviews?.nodes?.some(
-            (r) =>
-              r.author?.login === result.data?.viewer?.login &&
-              [
-                'APPROVED',
-                'CHANGES_REQUESTED',
-                'COMMENTED',
-                'DISMISSED',
-              ].includes(r.state),
-          ) ||
-          x.roles?.includes('reviewed') ||
-          false;
-        x.reviewedCurrentHead =
-          p.reviews?.nodes?.some(
-            (r) =>
-              r.author?.login === result.data?.viewer?.login &&
-              ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'].includes(
-                r.state,
-              ) &&
-              r.commit?.oid === p.headRefOid,
-          ) || false;
-        x.checkState =
-          p.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state || null;
-        if (
-          previousCheck &&
-          previousCheck !== 'FAILURE' &&
-          x.checkState === 'FAILURE'
-        )
-          broadcast({
-            method: 'pr/checkFailed',
-            params: { title: x.title, url: x.url },
-          });
-      }
-      broadcast({
-        method: 'github/updated',
-        params: { updated: cache.updated },
-      });
-      void scheduleAuto();
-    } catch (e) {
-      cache.errors.push(`PR status: ${e.message}`);
-      broadcast({
-        method: 'github/updated',
-        params: { updated: cache.updated },
-      });
-    }
   }
   function schedule() {
     clearInterval(timer);
@@ -623,25 +633,79 @@ export async function startServer({
     '/api/github/review-state',
     wrap(async (req, res) => res.json(await loadReviewState(req.query.url))),
   );
+  async function getPullDetail(value, roles) {
+    const url = canonicalGithubUrl(value);
+    const pr = await loadPullDetail(
+      url,
+      roles || cache.prs.find((x) => x.url === url)?.roles,
+    );
+    return { ...pr, linkedChat: state.links[url] || null };
+  }
   app.get(
     '/api/github/detail',
     wrap(async (req, res) => {
-      const { repo, number, kind } = githubUrl(req.query.url);
-      if (kind !== 'pull') throw Error('Expected a pull request');
-      const fields =
-        'number,title,url,body,state,isDraft,author,headRefName,baseRefName,mergeable,reviewDecision,reviews,comments,latestReviews,statusCheckRollup,reviewRequests';
-      const data = JSON.parse(
-        await run('gh', [
-          'pr',
-          'view',
-          String(number),
-          '-R',
-          repo,
-          '--json',
-          fields,
-        ]),
-      );
-      res.json(data);
+      res.json(await getPullDetail(req.query.url));
+    }),
+  );
+  app.post(
+    '/api/github/track',
+    wrap(async (req, res) => {
+      const pr = await getPullDetail(req.body.url);
+      if (pr.state !== 'OPEN') return res.json(pr);
+      if (!state.trackedPulls.includes(pr.url)) {
+        if (state.trackedPulls.length >= 100)
+          throw Error('The tracked pull request list is full');
+        state.trackedPulls.push(pr.url);
+        await saveState(state);
+      }
+      pr.roles = [...new Set([...pr.roles, 'tracked'])];
+      const index = cache.prs.findIndex((item) => item.url === pr.url);
+      if (index < 0) cache.prs.unshift(pr);
+      else cache.prs[index] = pr;
+      broadcast({
+        method: 'github/updated',
+        params: { updated: cache.updated },
+      });
+      res.json(pr);
+    }),
+  );
+  app.post(
+    '/api/github/merge',
+    wrap(async (req, res) => {
+      const result = await mergePull(req.body.url, req.body.headRefOid);
+      githubGeneration++;
+      cache.prs = cache.prs.filter((item) => item.url !== result.url);
+      broadcast({
+        method: 'github/updated',
+        params: { updated: cache.updated },
+      });
+      res.json(result);
+      void poll();
+    }),
+  );
+  app.post(
+    '/api/github/submit-review',
+    wrap(async (req, res) => {
+      const { url, headRefOid, body } = req.body;
+      const result =
+        body === undefined
+          ? await submitPendingReview(url, headRefOid)
+          : await submitReviewText(url, headRefOid, body);
+      githubGeneration++;
+      const pr = cache.prs.find((item) => item.url === result.url);
+      if (pr)
+        Object.assign(pr, {
+          pendingReview: false,
+          reviewedByMe: true,
+          reviewedCurrentHead: true,
+          pendingResponse: false,
+        });
+      broadcast({
+        method: 'github/updated',
+        params: { updated: cache.updated },
+      });
+      res.json(result);
+      void poll();
     }),
   );
   async function hasCodex() {
@@ -658,104 +722,128 @@ export async function startServer({
       res.json(await catalog(req.query.agent || 'codex')),
     ),
   );
+  const searchSessions = createSessionSearch();
   app.get(
     '/api/sessions',
     wrap(async (req, res) => {
-      let result = { data: [] };
-      if (await hasCodex()) {
-        await codex.start();
-        let cursor = null;
-        do {
-          const page = await codex.call('thread/list', {
-            limit: 100,
-            cursor,
-            sortKey: 'updated_at',
-            sourceKinds: [
-              'cli',
-              'vscode',
-              'exec',
-              'appServer',
-              'unknown',
-              'subAgent',
-              'subAgentReview',
-              'subAgentCompact',
-              'subAgentThreadSpawn',
-              'subAgentOther',
-            ],
-            archived: req.query.archived === 'true',
+      const reference = req.query.reference
+        ? canonicalGithubUrl(req.query.reference)
+        : '';
+      const includeActive = reference || req.query.archived !== 'true';
+      const includeArchived =
+        reference || ['true', 'all'].includes(req.query.archived);
+      const query =
+        typeof req.query.q === 'string' ? req.query.q.slice(0, 240) : '';
+      const abort = new AbortController();
+      res.once('close', () => abort.abort());
+      const errors = [];
+      const [agentSessions, claudeSessions] = await Promise.all([
+        hasCodex().then(async (installed) => {
+          if (!installed) return [];
+          const feeds = [];
+          if (includeActive) feeds.push(listCodexSessions(codex, false));
+          if (includeArchived) feeds.push(listCodexSessions(codex, true));
+          return (await Promise.allSettled(feeds)).flatMap((feed) => {
+            if (feed.status === 'fulfilled') return feed.value;
+            errors.push(`Codex: ${feed.reason.message}`);
+            return [];
           });
-          result.data.push(...page.data);
-          cursor = page.nextCursor || null;
-        } while (cursor && result.data.length < 1000);
-        result.truncated = !!cursor;
-      }
-      if (req.query.archived !== 'true')
-        result.data = [
-          ...result.data,
-          ...Object.values(state.drafts).map((d) => ({
-            id: d.id,
-            cwd: d.cwd,
-            preview: 'New session',
-            updatedAt: d.createdAt / 1000,
-            agent: d.agent,
-          })),
-          ...(await listClaude()),
-          ...Array.from(pendingClaude.values()),
-        ]
-          .filter((x, i, a) => a.findIndex((y) => y.id === x.id) === i)
-          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-      result.data = result.data.map((session) =>
-        codex.active.has(session.id)
-          ? { ...session, status: { type: 'active', activeFlags: [] } }
-          : session,
+        }),
+        includeActive ? listClaude() : [],
+        codex.start().catch((error) => errors.push(error.message)),
+      ]);
+      const localSessions = includeActive
+        ? [
+            ...Object.values(state.drafts).map((draft) => ({
+              id: draft.id,
+              cwd: draft.cwd,
+              preview: 'New session',
+              updatedAt: draft.createdAt / 1000,
+              agent: draft.agent,
+            })),
+            ...pendingClaude.values(),
+          ]
+        : [];
+      const matches = await searchSessions(
+        mergeSessions(agentSessions, localSessions, claudeSessions),
+        {
+          query,
+          reference,
+          signal: abort.signal,
+          worktrees: state.worktreeProjects,
+        },
       );
-      res.json(result);
+      if (abort.signal.aborted) return;
+      res.json({
+        data: matches.map(({ file: _file, ...session }) =>
+          codex.active.has(session.id)
+            ? {
+                ...session,
+                status: {
+                  type: 'active',
+                  activeFlags: session.status?.activeFlags || [],
+                },
+              }
+            : session,
+        ),
+        errors,
+      });
     }),
   );
+  const getDraft = (id) =>
+    Object.hasOwn(state.drafts, id) ? state.drafts[id] : null;
+  const savedSessionOptions = (id) =>
+    Object.hasOwn(state.sessionOptions, id) ? state.sessionOptions[id] : {};
+  async function readSession(id, includeTurns) {
+    const draft = getDraft(id);
+    if (draft) return { ...draft, preview: 'New session', turns: [] };
+    if (id.startsWith('claude:')) {
+      await codex.start().catch(() => {});
+      try {
+        return await claudeThread(id);
+      } catch (error) {
+        const pending = pendingClaude.get(id);
+        if (!pending) throw error;
+        return {
+          ...pending,
+          turns: [
+            {
+              items: [
+                { type: 'userMessage', content: [{ text: pending.prompt }] },
+              ],
+            },
+          ],
+        };
+      }
+    }
+    return (await codex.call('thread/read', { threadId: id, includeTurns }))
+      .thread;
+  }
   app.get(
     '/api/session/:id',
     wrap(async (req, res) => {
-      if (state.drafts[req.params.id])
-        return res.json({
-          thread: {
-            ...state.drafts[req.params.id],
-            preview: 'New session',
-            turns: [],
-          },
-          externalUse: { blocked: false, available: true },
-        });
-      let thread;
-      if (req.params.id.startsWith('claude:')) {
-        try {
-          thread = await claudeThread(req.params.id);
-        } catch (e) {
-          const p = pendingClaude.get(req.params.id);
-          if (!p) throw e;
-          thread = {
-            ...p,
-            turns: [
-              {
-                items: [{ type: 'userMessage', content: [{ text: p.prompt }] }],
-              },
-            ],
-          };
-        }
-      } else {
-        await codex.start();
-        thread = (
-          await codex.call('thread/read', {
-            threadId: req.params.id,
-            includeTurns: true,
-          })
-        ).thread;
-      }
-      const inUse = await externalUse({
-        cwd: thread.cwd,
-        agent: req.params.id.startsWith('claude:') ? 'claude' : 'codex',
+      const { id } = req.params;
+      const thread = await readSession(id, true);
+      const draft = getDraft(id);
+      const inUse = draft
+        ? { blocked: false, available: true }
+        : await externalUse({
+            cwd: thread.cwd,
+            agent: thread.agent || 'codex',
+          });
+      const options = draft || savedSessionOptions(id);
+      res.json({
+        thread,
+        externalUse: inUse,
+        active: codex.active.has(id),
+        options: {
+          model: options.model ?? thread.model ?? '',
+          effort: options.effort ?? thread.reasoningEffort ?? '',
+        },
       });
-      res.json({ thread, externalUse: inUse });
     }),
   );
+  const worktreeAdds = new Map();
   async function prepareWorktree(project, label) {
     const token = randomUUID().slice(0, 8),
       safe = label.replace(/[^a-z0-9-]/gi, '-').slice(0, 50);
@@ -768,16 +856,37 @@ export async function startServer({
       `${safe}-${token}`,
     );
     await fs.mkdir(path.dirname(dir), { recursive: true, mode: 0o700 });
-    await run('git', [
-      '-C',
-      project,
-      'worktree',
-      'add',
-      '-b',
-      `prquay/${safe}-${token}`,
-      dir,
-      'HEAD',
-    ]);
+    const commonDir = (
+      await run('git', [
+        '-C',
+        project,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-common-dir',
+      ])
+    ).trim();
+    // Worktree creation updates shared repository metadata.
+    const previous = worktreeAdds.get(commonDir) || Promise.resolve();
+    const add = previous
+      .catch(() => {})
+      .then(() =>
+        run('git', [
+          '-C',
+          project,
+          'worktree',
+          'add',
+          '-b',
+          `prquay/${safe}-${token}`,
+          dir,
+          'HEAD',
+        ]),
+      );
+    worktreeAdds.set(commonDir, add);
+    try {
+      await add;
+    } finally {
+      if (worktreeAdds.get(commonDir) === add) worktreeAdds.delete(commonDir);
+    }
     state.worktreeProjects ??= {};
     state.worktreeProjects[dir] = project;
     await saveState(state);
@@ -793,22 +902,30 @@ export async function startServer({
     wrap(async (req, res) => {
       const {
         project,
-        model,
-        effort,
+        folder,
         permission,
         agent = 'codex',
         worktree = false,
       } = req.body;
       if (!['codex', 'claude'].includes(agent)) throw Error('Unknown agent');
+      const { model, effort } = sessionModelOptions(req.body);
       if (agent === 'claude')
         await run('claude', ['--version'], { timeout: 4000 });
-      const ps = await configuredProjects(state.settings);
-      if (!ps.some((x) => x.path === project))
-        throw Error('Choose a discovered project');
-      await rememberWorktree(project, worktree);
+      if (folder !== undefined && worktree)
+        throw Error('Choose a project to start a Git worktree');
+      const directory = await sessionDirectory({
+        project,
+        folder,
+        projects:
+          folder === undefined ? await configuredProjects(state.settings) : [],
+      });
+      if (project) await rememberWorktree(project, worktree);
       const cwd = worktree
-        ? await prepareWorktree(project, `session-${path.basename(project)}`)
-        : project;
+        ? await prepareWorktree(
+            directory,
+            `session-${path.basename(directory)}`,
+          )
+        : directory;
       const id = `draft:${randomUUID()}`;
       state.drafts[id] = {
         id,
@@ -824,121 +941,147 @@ export async function startServer({
     }),
   );
   app.post(
+    '/api/session/:id/options',
+    wrap(async (req, res) => {
+      const { id } = req.params;
+      if (openingDrafts.has(id)) throw Error('This chat is already starting');
+      const options = sessionModelOptions(req.body);
+      const draft = getDraft(id);
+      if (draft) Object.assign(draft, options);
+      else {
+        const thread = await readSession(id, false);
+        if (thread.id !== id) throw Error('Session not found');
+        state.sessionOptions[id] = { ...savedSessionOptions(id), ...options };
+      }
+      await saveState(state);
+      res.json({ options });
+    }),
+  );
+  app.post(
+    '/api/session/:id/interrupt',
+    wrap(async (req, res) => {
+      await codex.call('host/interrupt', { threadId: req.params.id });
+      res.json({ ok: true });
+    }),
+  );
+  const openingDrafts = new Set();
+  app.post(
     '/api/session/:id/message',
     wrap(async (req, res) => {
       let id = req.params.id;
-      const text = String(req.body.text || '').trim();
+      const text =
+        typeof req.body.text === 'string' ? req.body.text.trim() : '';
       if (!text) throw Error('Enter a message');
-      const draft = state.drafts[id];
+      const mode = req.body.mode || 'send';
+      if (!['send', 'steer'].includes(mode))
+        throw Error('Unknown message action');
+      const input = [{ type: 'text', text }];
+      const draft = getDraft(id);
       if (draft) {
-        if (draft.agent === 'claude') {
-          const uuid = randomUUID();
-          id = await runClaude(
-            {
-              id: uuid,
-              cwd: draft.cwd,
+        if (mode === 'steer')
+          throw Error('This chat has no active turn to steer');
+        if (openingDrafts.has(id)) throw Error('This chat is already starting');
+        openingDrafts.add(id);
+        try {
+          const { model, effort, permission, cwd } = draft;
+          if (draft.agent === 'claude') {
+            id = await runClaude({
+              id: randomUUID(),
+              cwd,
               prompt: text,
-              model: draft.model,
-              effort: draft.effort,
-              permission: draft.permission,
-            },
-            broadcast,
-          );
-          pendingClaude.set(id, {
-            id,
-            cwd: draft.cwd,
-            agent: 'claude',
-            preview: text,
-            updatedAt: Date.now() / 1000,
-            prompt: text,
-            status: { type: 'active' },
-          });
-          state.sessionOptions ??= {};
-          state.sessionOptions[id] = {
-            model: draft.model,
-            effort: draft.effort,
-            permission: draft.permission,
-          };
-        } else {
-          await codex.start();
-          const danger = draft.permission === 'danger';
-          const started = await codex.call('thread/start', {
-            cwd: draft.cwd,
-            model: draft.model || null,
-            approvalPolicy: danger ? 'never' : 'on-request',
-            sandbox: danger ? 'danger-full-access' : 'workspace-write',
-          });
-          id = started.thread.id;
-          await codex.call('turn/start', {
-            threadId: id,
-            input: [{ type: 'text', text }],
-            effort: draft.effort || null,
-          });
+              model,
+              effort,
+              permission,
+            });
+            if (codex.active.has(id))
+              pendingClaude.set(id, {
+                id,
+                cwd,
+                agent: 'claude',
+                preview: text,
+                updatedAt: Date.now() / 1000,
+                prompt: text,
+                status: { type: 'active' },
+              });
+          } else {
+            const danger = permission === 'danger';
+            const started = await codex.call('thread/start', {
+              cwd,
+              model: model || null,
+              approvalPolicy: danger ? 'never' : 'on-request',
+              sandbox: danger ? 'danger-full-access' : 'workspace-write',
+            });
+            id = started.thread.id;
+            await codex.call('turn/start', {
+              threadId: id,
+              input,
+              effort: effort || null,
+            });
+          }
+          state.sessionOptions[id] = { model, effort, permission };
+          delete state.drafts[req.params.id];
+          await saveState(state);
+        } finally {
+          openingDrafts.delete(req.params.id);
         }
-        delete state.drafts[req.params.id];
-        await saveState(state);
         return res.json({ ok: true, id });
       }
-      if (id.startsWith('claude:')) {
-        const thread = await claudeThread(id);
-        const guard = await externalUse({ cwd: thread.cwd, agent: 'claude' });
-        if (!guard.available)
-          throw Error(
-            'Unable to check whether this session is in use elsewhere.',
-          );
-        if (guard.blocked)
-          throw Error(
-            'Another Claude terminal is open in this project. Close it before sending.',
-          );
-        await runClaude(
-          {
-            id: id.slice(7),
-            cwd: thread.cwd,
-            prompt: text,
-            model: state.sessionOptions?.[id]?.model,
-            effort: state.sessionOptions?.[id]?.effort,
-            permission: state.sessionOptions?.[id]?.permission || 'danger',
-            resume: true,
-          },
-          broadcast,
-        );
-        return res.json({ ok: true, id });
-      }
-      await codex.start();
-      const existing = await codex.call('thread/read', {
-        threadId: id,
-        includeTurns: false,
-      });
-      const guard = await externalUse({
-        cwd: existing.thread.cwd,
-        agent: 'codex',
-      });
+      const thread = await readSession(id, false);
+      const agent = id.startsWith('claude:') ? 'claude' : 'codex';
+      const guard = await externalUse({ cwd: thread.cwd, agent });
       if (!guard.available)
         throw Error(
           'Unable to check whether this session is in use elsewhere.',
         );
-      if (guard.blocked)
+      if (guard.blocked) {
+        const name = agent === 'claude' ? 'Claude' : 'Codex';
         throw Error(
-          'Another Codex terminal is open in this project. Close it before sending.',
+          `Another ${name} terminal is open in this project. Close it before sending.`,
         );
-      await codex.call('thread/resume', { threadId: id });
-      await codex.call('turn/start', {
-        threadId: id,
-        input: [{ type: 'text', text }],
-      });
+      }
+      const { model, effort, permission } = savedSessionOptions(id);
+      if (agent === 'claude') {
+        if (mode === 'steer')
+          await codex.call('host/interrupt', { threadId: id });
+        await runClaude({
+          id: id.slice(7),
+          cwd: thread.cwd,
+          prompt: text,
+          model,
+          effort,
+          permission: permission || state.settings.permission || 'danger',
+          resume: true,
+        });
+      } else if (mode === 'steer') {
+        await codex.call('host/steer', { threadId: id, input });
+      } else {
+        if (codex.active.has(id))
+          throw Error('Steer the active turn or stop it before sending');
+        await codex.call('thread/resume', { threadId: id });
+        await codex.call('turn/start', {
+          threadId: id,
+          input,
+          ...(model ? { model } : {}),
+          ...(effort ? { effort } : {}),
+        });
+      }
       res.json({ ok: true, id });
     }),
   );
   app.post(
     '/api/session/:id/archive',
     wrap(async (req, res) => {
-      if (state.drafts[req.params.id]) {
+      if (getDraft(req.params.id)) {
+        if (openingDrafts.has(req.params.id))
+          throw Error('This chat is starting');
         delete state.drafts[req.params.id];
         await saveState(state);
         return res.json({ ok: true });
       }
       if (req.params.id.startsWith('claude:'))
         throw Error('Archiving Claude sessions is not supported yet');
+      if (codex.active.has(req.params.id))
+        throw Error('Stop the active turn before archiving');
       await codex.start();
       await codex.call('thread/archive', { threadId: req.params.id });
       res.json({ ok: true });
@@ -955,19 +1098,20 @@ export async function startServer({
     }),
   );
   const startingJobs = new Set();
-  async function startJob(input) {
+  async function startJob(input, candidate) {
     const url = canonicalGithubUrl(input.url);
     if (startingJobs.has(url))
       throw Error('A workflow is already starting for this item.');
     startingJobs.add(url);
     try {
-      return await launchJob(input);
+      return await launchJob(input, candidate);
     } finally {
       startingJobs.delete(url);
     }
   }
-  async function launchJob(input) {
-    const { kind, outcome, forceNew, isolated, auto } = input,
+  async function launchJob(input, candidate) {
+    const { kind, outcome, forceNew, isolated } = input,
+      auto = !!candidate,
       url = canonicalGithubUrl(input.url),
       target = githubUrl(url);
     if (
@@ -1005,13 +1149,39 @@ export async function startServer({
           p.repo?.toLowerCase() === target.repo.toLowerCase() &&
           (!input.project || p.path === input.project),
       );
-    if (!project)
+    if (!project && kind !== 'review')
       throw Error(
         'No local checkout for ' +
           target.repo +
           '. Set its repository folder in Settings.',
       );
-    const config = state.settings.workflows?.[kind] || {};
+    let current;
+    if (auto) {
+      current = await getPullDetail(url);
+      const fresh = autoCandidates(
+        { prs: [current] },
+        {},
+        state.settings,
+        state.preparations,
+      ).find((item) => item.key === candidate.key);
+      if (!state.autoEnabled || !fresh || fresh.mode !== candidate.mode)
+        throw Error('The GitHub state or automation settings changed');
+    }
+    const reviewContext =
+      kind === 'review' || (auto && kind === 'comments')
+        ? await loadReviewContext(url)
+        : undefined;
+    const action =
+      candidate?.action ||
+      (kind === 'review' &&
+      (input.rereview === true || reviewContext?.reviewedByMe)
+        ? 'rereview'
+        : kind);
+    if (!project && !current) current = await getPullDetail(url);
+    const config = {
+      ...state.settings.workflows?.[kind],
+      ...state.settings.workflows?.[action],
+    };
     let agent =
       input.agent || config.agent || state.settings.defaultAgent || 'codex';
     let permission =
@@ -1033,6 +1203,7 @@ export async function startServer({
       !['danger', 'sandbox'].includes(permission)
     )
       throw Error('Invalid agent or permissions');
+    if (auto) permission = 'sandbox';
     if (auto && !state.autoEnabled) throw Error('Auto mode was turned off');
     let issueContext;
     if (kind === 'describe') {
@@ -1042,7 +1213,7 @@ export async function startServer({
           'view',
           String(target.number),
           '-R',
-          target.repo,
+          getGithubHost() + '/' + target.repo,
           '--json',
           'title,body,comments,labels',
         ]),
@@ -1050,25 +1221,37 @@ export async function startServer({
       if (issueContext.body?.trim())
         throw Error('This issue already has a description');
     }
-    const reviewContext =
-      kind === 'review' ? await loadReviewContext(url) : undefined;
+    const localReview = kind === 'review' && (auto || !project);
+    const restricted = auto || localReview;
+    if (restricted) {
+      permission = 'sandbox';
+      await codex.requireAutomation();
+    }
     const sourceHead =
-      target.kind === 'pull' && kind !== 'review'
+      current?.headRefOid ||
+      (target.kind === 'pull' && kind !== 'review'
         ? JSON.parse(
             await run('gh', ['pr', 'view', url, '--json', 'headRefOid']),
           ).headRefOid
-        : null;
-    let cwd = project.path,
-      id = forceNew || isolated ? null : state.links[url];
+        : null);
+    if (localReview && reviewContext.pullRequest?.headRefOid !== sourceHead)
+      throw Error('The PR changed before the review started');
+    let cwd = project?.path,
+      id = forceNew || isolated || !project ? null : state.links[url];
+    if (
+      id &&
+      (input.agent || config.agent) &&
+      (id.startsWith('claude:') ? 'claude' : 'codex') !== agent
+    )
+      id = null;
     if (id) {
       try {
         if (id.startsWith('claude:')) {
           const thread = await claudeThread(id);
           cwd = thread.cwd;
           agent = 'claude';
-          model = state.sessionOptions?.[id]?.model;
-          effort = state.sessionOptions?.[id]?.effort;
-          permission = state.sessionOptions?.[id]?.permission || permission;
+          model ||= state.sessionOptions?.[id]?.model;
+          effort ||= state.sessionOptions?.[id]?.effort;
         } else {
           await codex.start();
           const result = await codex.call('thread/read', {
@@ -1090,6 +1273,7 @@ export async function startServer({
     );
     const checkoutDirty =
       target.kind === 'pull' &&
+      cwd &&
       !!(await run('git', ['-C', cwd, 'status', '--porcelain'])).trim();
     const needsIsolation = checkoutBusy || checkoutDirty;
     if (needsIsolation) id = null;
@@ -1111,25 +1295,65 @@ export async function startServer({
       (kind === 'issue' || kind === 'describe')
     )
       await rememberWorktree(project.path, isolated);
-    if (
+    const taskId = randomUUID(),
+      artifactDir = path.join(path.dirname(statePath), 'prepared', taskId);
+    let automatedContext;
+    if (auto || localReview) {
+      ({ cwd, context: automatedContext } = await prepareAutomaticCheckout({
+        project: project?.path,
+        directory: artifactDir,
+        pull: current,
+        kind,
+        discussion: kind === 'comments' ? reviewContext : undefined,
+      }));
+      if (project) {
+        state.worktreeProjects ??= {};
+        state.worktreeProjects[cwd] = project.path;
+      }
+    } else if (
       isolated ||
       (!id &&
         (needsIsolation || (target.kind === 'pull' && isolated !== false)))
-    )
+    ) {
       cwd = await prepareWorktree(project.path, kind + '-' + target.number);
-    const taskId = randomUUID(),
-      artifactDir = path.join(path.dirname(statePath), 'prepared', taskId);
+    }
     await fs.mkdir(artifactDir, { recursive: true, mode: 0o700 });
-    const artifact = path.join(
-      artifactDir,
-      kind === 'describe' ? 'description.md' : 'pr.json',
-    );
+    const artifact =
+      localReview || auto
+        ? path.join(cwd, 'opus-result-' + taskId + '.json')
+        : path.join(
+            artifactDir,
+            kind === 'describe' ? 'description.md' : 'pr.json',
+          );
     const initialHead =
       sourceHead || (await run('git', ['-C', cwd, 'rev-parse', 'HEAD'])).trim();
     const prompt = jobPrompt(kind, url, {
       outcome,
       publish: false,
-      auto: !!auto,
+      auto,
+      localReview,
+      rereview: action === 'rereview',
+      criteria: state.settings.reviewCriteria,
+      repositories: ps.filter(
+        (other) =>
+          other.repo &&
+          other.path !== project?.path &&
+          ((state.settings.reviewRelatedRepos || []).some(
+            (name) => name.toLowerCase() === other.repo.toLowerCase(),
+          ) ||
+            (reviewContext?.relatedPullRequests || []).some((pull) =>
+              pull.url
+                .toLowerCase()
+                .startsWith(
+                  'https://' +
+                    getGithubHost() +
+                    '/' +
+                    other.repo.toLowerCase() +
+                    '/',
+                ),
+            )),
+      ),
+      automatedContext,
       context: reviewContext,
       tone: state.settings.reviewTone,
       scope: state.settings.reviewScope,
@@ -1150,10 +1374,23 @@ export async function startServer({
         artifact,
         status: 'running',
         startedAt: Date.now(),
-        auto: !!auto,
+        auto,
+        action,
+        localReview,
+        githubHost: getGithubHost(),
+        ...(auto
+          ? {
+              autoKey: candidate.key,
+              requestedMode: candidate.mode,
+              base: candidate.base,
+              signal: candidate.signal,
+              viewer: current.viewer,
+            }
+          : {}),
         pushOnCompletion,
         background: true,
       };
+      updateAutoRecord(state.preparations[taskId]);
       await saveState(state);
       await codex.call('host/register', state.preparations[taskId]);
     }
@@ -1165,7 +1402,16 @@ export async function startServer({
       await register(id);
       try {
         await runClaude(
-          { id: uuid, cwd, prompt, model, effort, permission, resume },
+          {
+            id: uuid,
+            cwd,
+            prompt,
+            model,
+            effort,
+            permission,
+            resume,
+            automated: restricted,
+          },
           broadcast,
         );
       } catch (error) {
@@ -1183,10 +1429,27 @@ export async function startServer({
           await codex.call('thread/start', {
             cwd,
             model: model || null,
-            approvalPolicy: danger ? 'never' : 'on-request',
+            approvalPolicy: danger || restricted ? 'never' : 'on-request',
             sandbox: danger ? 'danger-full-access' : 'workspace-write',
+            ...(restricted ? { config: await restrictedCodexConfig(cwd) } : {}),
           })
         ).thread.id;
+      }
+      if (restricted) {
+        const inventory = await codex.call('mcpServerStatus/list', {
+          threadId: id,
+          limit: 100,
+          detail: 'toolsAndAuthOnly',
+        });
+        if (
+          !Array.isArray(inventory.data) ||
+          inventory.nextCursor ||
+          inventory.data.some((server) => server.runtimeStatus !== 'disabled')
+        ) {
+          throw Error(
+            'Codex still has connected tools in the isolated session',
+          );
+        }
       }
       await register(id);
       try {
@@ -1194,6 +1457,19 @@ export async function startServer({
           threadId: id,
           input: [{ type: 'text', text: prompt }],
           effort: effort || null,
+          ...(model ? { model } : {}),
+          ...(restricted
+            ? {
+                approvalPolicy: 'never',
+                sandboxPolicy: {
+                  type: 'workspaceWrite',
+                  writableRoots: [],
+                  networkAccess: false,
+                  excludeTmpdirEnvVar: true,
+                  excludeSlashTmp: true,
+                },
+              }
+            : {}),
         });
       } catch (e) {
         await broadcastLaunchFailure(taskId, e);
@@ -1205,6 +1481,32 @@ export async function startServer({
     broadcast({ method: 'approvals/updated', params: {} });
     return { id };
   }
+  async function restrictedCodexConfig(cwd) {
+    const { config } = await codex.call('config/read', {
+      cwd,
+      includeLayers: false,
+    });
+    return {
+      mcp_servers: Object.fromEntries(
+        Object.keys(config?.mcp_servers || {}).map((name) => [
+          name,
+          { enabled: false },
+        ]),
+      ),
+      web_search: 'disabled',
+      shell_environment_policy: { inherit: 'core' },
+      features: {
+        apps: false,
+        plugins: false,
+        remote_plugin: false,
+        hooks: false,
+        browser_use: false,
+        browser_use_external: false,
+        in_app_browser: false,
+        skill_mcp_dependency_install: false,
+      },
+    };
+  }
   async function broadcastLaunchFailure(taskId, error) {
     const task = state.preparations[taskId];
     task.status = 'failed';
@@ -1214,77 +1516,169 @@ export async function startServer({
   }
   app.post(
     '/api/job',
-    wrap(async (req, res) => res.json(await startJob(req.body))),
+    wrap(async (req, res) => {
+      if ('auto' in req.body)
+        throw Error('Auto workflows start from synchronized GitHub state');
+      res.json(await startJob(req.body));
+    }),
   );
-  async function scheduleAuto() {
-    if (!state.autoEnabled || autoBusy) return;
+  function updateAutoRecord(task) {
+    if (!task.autoKey) return;
     state.autoRuns ??= {};
-    const ps = await configuredProjects(state.settings);
-    if (!state.autoEnabled || autoBusy) return;
-    const candidate = autoCandidates(cache, state.autoRuns).find(
-      (c) =>
-        !Object.values(state.preparations).some(
-          (t) =>
-            t.url === c.url &&
-            [
-              'running',
-              'collecting',
-              'pending',
-              'publishing',
-              'failed',
-            ].includes(t.status),
-        ) &&
-        ps.some(
-          (p) => p.repo?.toLowerCase() === githubUrl(c.url).repo.toLowerCase(),
-        ),
-    );
-    if (!candidate) return;
-    autoBusy = true;
-    state.autoRuns[candidate.key] = {
-      ...candidate,
-      status: 'starting',
-      at: Date.now(),
-    };
-    await saveState(state);
-    if (!state.autoEnabled) {
-      state.autoRuns[candidate.key].status = 'cancelled';
-      autoBusy = false;
-      await saveState(state);
+    const record = state.autoRuns[task.autoKey];
+    if (record)
+      Object.assign(record, {
+        id: task.id,
+        status: task.status,
+        error: task.error,
+      });
+  }
+  function requestAuto() {
+    if (autoBusy) {
+      runAutoAgain = true;
       return;
     }
+    void scheduleAuto().catch((error) =>
+      broadcast({ method: 'auto/error', params: { error: error.message } }),
+    );
+  }
+  async function scheduleAuto() {
+    if (!state.autoEnabled || autoBusy || polling) return;
+    autoBusy = true;
     try {
-      const result = await startJob({
-        url: candidate.url,
-        kind: candidate.kind,
-        outcome: 'implement, commit, push and create a pull request',
-        forceNew: true,
-        isolated: true,
-        auto: true,
-      });
-      autoThread = result.id;
-      state.autoRuns[candidate.key].id = result.id;
-      state.autoRuns[candidate.key].status = 'running';
+      for (const task of Object.values(state.preparations)) {
+        if (task.githubHost !== getGithubHost()) continue;
+        const effect = automaticEffect(task, state.autoEnabled, state.settings);
+        if (effect) await applyAutomaticResult(task, effect);
+      }
+      const tasks = Object.values(state.preparations);
+      if (
+        !state.autoEnabled ||
+        polling ||
+        tasks.some(
+          (task) =>
+            task.auto &&
+            ['running', 'collecting', 'publishing'].includes(task.status),
+        )
+      )
+        return;
+      const ps = await configuredProjects(state.settings);
+      if (!state.autoEnabled || polling) return;
+      state.autoRuns ??= {};
+      const candidate = autoCandidates(
+        cache,
+        state.autoRuns,
+        state.settings,
+        state.preparations,
+      ).find(
+        (c) =>
+          !tasks.some(
+            (t) =>
+              t.url === c.url &&
+              (['running', 'collecting', 'publishing'].includes(t.status) ||
+                (t.status === 'pending' &&
+                  (t.kind === c.kind || t.type === 'code'))),
+          ) &&
+          (c.kind === 'review' ||
+            ps.some(
+              (p) =>
+                p.repo?.toLowerCase() === githubUrl(c.url).repo.toLowerCase(),
+            )),
+      );
+      if (!candidate) return;
+      await codex.requireAutomation();
+      if (!state.autoEnabled || polling) return;
+      state.autoRuns[candidate.key] = {
+        ...candidate,
+        status: 'starting',
+        at: Date.now(),
+      };
       await saveState(state);
-      broadcast({
-        method: 'auto/started',
-        params: {
-          threadId: result.id,
-          title: candidate.kind,
-          url: candidate.url,
-        },
-      });
-      const early = recentCompletions.get(result.id);
-      if (early) broadcast(early);
-    } catch (e) {
-      state.autoRuns[candidate.key].status = 'failed';
-      state.autoRuns[candidate.key].error = e.message;
+      try {
+        const result = await startJob(
+          {
+            url: candidate.url,
+            kind: candidate.kind,
+            forceNew: true,
+            isolated: true,
+          },
+          candidate,
+        );
+        broadcast({
+          method: 'auto/started',
+          params: {
+            threadId: result.id,
+            title: candidate.action,
+            url: candidate.url,
+          },
+        });
+      } catch (error) {
+        Object.assign(state.autoRuns[candidate.key], {
+          status: 'failed',
+          error: error.message,
+        });
+        await saveState(state);
+        broadcast({
+          method: 'auto/error',
+          params: { error: error.message, url: candidate.url },
+        });
+        setTimeout(requestAuto, 0);
+      }
+    } finally {
       autoBusy = false;
-      await saveState(state);
-      broadcast({
-        method: 'auto/error',
-        params: { error: e.message, url: candidate.url },
-      });
+      if (runAutoAgain) {
+        runAutoAgain = false;
+        setTimeout(requestAuto, 0);
+      }
     }
+  }
+  async function applyAutomaticResult(task, effect) {
+    const authorized = () =>
+      task.githubHost === getGithubHost() &&
+      state.autoEnabled &&
+      (effect === 'draft'
+        ? getAutoActionMode(state.settings, task.action) !== 'off'
+        : getAutoActionMode(state.settings, task.action) === 'publish');
+    task.automaticEffect = 'attempted';
+    task.status = 'publishing';
+    updateAutoRecord(task);
+    await saveState(state);
+    broadcast({ method: 'approvals/updated', params: { key: task.key } });
+    try {
+      if (task.type === 'review-artifact') {
+        const latest = await getPullDetail(task.url);
+        const current = autoCandidates(
+          { prs: [latest] },
+          {},
+          state.settings,
+          state.preparations,
+        );
+        if (
+          !current.some((candidate) => candidate.key === task.autoKey) ||
+          latest.viewer !== task.viewer
+        )
+          throw Error('The review request or its latest replies changed');
+      }
+      const prepared = { ...task, status: 'pending' };
+      const result =
+        task.type === 'review-artifact'
+          ? await materializeReview(prepared, effect, undefined, authorized)
+          : await publishPrepared(prepared, undefined, authorized);
+      task.status = effect === 'draft' ? 'complete' : 'published';
+      task.publishedAt = Date.now();
+      task.publishedUrl = result.url;
+      if (effect === 'draft') {
+        task.note = 'Draft review ready on GitHub';
+        if (result.reviewId) task.reviewId = result.reviewId;
+      }
+      void poll();
+    } catch (error) {
+      task.status = 'pending';
+      task.error = error.message;
+    }
+    updateAutoRecord(task);
+    await saveState(state);
+    broadcast({ method: 'approvals/updated', params: { key: task.key } });
   }
   app.post(
     '/api/auto',
@@ -1339,7 +1733,7 @@ export async function startServer({
       }
     await saveState(state);
     broadcast({ method: 'approvals/updated', params: { key: task.key } });
-    void scheduleAuto();
+    requestAuto();
   }
   app.get('/api/approvals', (req, res) =>
     res.json({
@@ -1427,7 +1821,7 @@ export async function startServer({
   app.post(
     '/api/settings',
     wrap(async (req, res) => {
-      const reviewSettings = validateReviewSettings(req.body);
+      const reviewSettings = validateReviewSettings(req.body, state.settings);
       if (req.body.sprintRepo) repoName(req.body.sprintRepo);
       if (
         req.body.sprintProjectId &&
@@ -1447,10 +1841,15 @@ export async function startServer({
         }
       }
       if ('githubHost' in req.body) {
-        setGithubHost(req.body.githubHost || 'github.com');
-        req.body.githubHost = process.env.GH_HOST;
-        detectedUsername = null;
-        cache = { prs: [], issues: [], errors: [], updated: null };
+        const previousHost = getGithubHost();
+        const host = setGithubHost(req.body.githubHost || 'github.com');
+        req.body.githubHost = host;
+        if (host !== previousHost) {
+          githubGeneration++;
+          normalizeGithubBindings();
+          detectedUsername = null;
+          cache = { prs: [], issues: [], errors: [], updated: null };
+        }
       }
       const allowed = [
         'root',
@@ -1475,6 +1874,8 @@ export async function startServer({
       await saveState(state);
       schedule();
       res.json(state.settings);
+      if ('githubHost' in req.body) void poll();
+      else requestAuto();
     }),
   );
   app.use(express.static(staticRoot));
@@ -1494,6 +1895,10 @@ export async function startServer({
     server.once('error', reject);
   });
   for (const task of Object.values(state.preparations)) {
+    if (task.status === 'publishing' && task.automaticEffect) {
+      task.status = 'pending';
+      task.error = 'Publication was interrupted. Check GitHub before retrying.';
+    }
     if (task.background) continue;
     if (['running', 'collecting'].includes(task.status)) {
       task.status = 'failed';

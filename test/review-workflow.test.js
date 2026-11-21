@@ -7,7 +7,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 
-test('manual and Auto reviews require approval and use full context', async (t) => {
+test('review turns use full context and enforce draft and live GitHub effects', async (t) => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'opusdesk-review-'));
   const bin = path.join(tmp, 'bin'),
     root = path.join(tmp, 'projects'),
@@ -33,6 +33,30 @@ test('manual and Auto reviews require approval and use full context', async (t) 
     '-qm',
     'initial',
   ]);
+  const localHead = () =>
+    execFileSync('git', ['-C', project, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+  const baseCommit = localHead();
+  async function commitLine(line) {
+    await fs.writeFile(path.join(project, 'file.txt'), line + '\n');
+    execFileSync('git', [
+      '-C',
+      project,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      '-c',
+      'commit.gpgsign=false',
+      'commit',
+      '-qam',
+      line,
+    ]);
+    return localHead();
+  }
+  const reviewCommit = await commitLine('changed line');
+  const newCommit = await commitLine('new revision');
   execFileSync('git', [
     '-C',
     project,
@@ -55,40 +79,24 @@ test('manual and Auto reviews require approval and use full context', async (t) 
     }),
   );
   const fixtureFile = path.join(tmp, 'fixture.json');
-  const fixture = { auto: false, head: 'head1', fail: false };
+  const fixture = {
+    auto: false,
+    head: reviewCommit,
+    base: baseCommit,
+    fail: false,
+    previouslyReviewed: true,
+  };
   const updateFixture = () =>
     fs.writeFile(fixtureFile, JSON.stringify(fixture));
   await updateFixture();
-  await fs.writeFile(
-    path.join(bin, 'gh'),
-    `#!/usr/bin/env node
-const fs=require('fs');const a=process.argv.slice(2),f=JSON.parse(fs.readFileSync(process.env.REVIEW_FIXTURE,'utf8'));const pr={url:'https://github.com/a/b/pull/7',number:7,title:'PR intent',body:'Fixes #5',headRefOid:f.head,closingIssuesReferences:[{url:'https://github.com/a/b/issues/5'}],headRefName:'fix-ci',headRepository:{name:'fork'},headRepositoryOwner:{login:'contributor'}};let result;
-if(a.includes('--method')){fs.appendFileSync(process.env.REVIEW_WRITES,JSON.stringify(a)+'\\n');console.log('{}');process.exit(0)}
-if(a[0]==='issue'&&a[1]==='comment'){fs.appendFileSync(process.env.REVIEW_WRITES,fs.readFileSync(a.at(-1),'utf8'));console.log('{}');process.exit(0)}
-if(a[0]==='--version'){console.log('gh test');process.exit(0)}
-if(a[0]==='search')result=f.auto&&a[1]==='prs'&&a.includes('--review-requested')?[{...pr,state:'open',updatedAt:'2026-01-01T00:00:00Z',repository:{nameWithOwner:'a/b'}}]:[];
-else if(a[0]==='pr'&&a[1]==='view'){if(f.fail)process.exit(1);result=pr;}
-else if(a[0]==='api'&&a.includes('graphql'))result={data:{viewer:{login:'me'},p0:{pullRequest:{headRefOid:f.head,baseRefOid:'base',mergeable:'MERGEABLE',reviews:{nodes:[{author:{login:'me'},state:'COMMENTED'}]},commits:{nodes:[]}}}}};
-else if(a.at(-1)==='user')result={login:'me'};
-else {const responses={'repos/a/b/issues/7/comments':[[{body:'PR discussion'}]],'repos/a/b/pulls/7/reviews':[[{user:{login:'me'},state:'COMMENTED',body:'Earlier feedback',commit_id:'older'},...(f.pending?[{id:99,user:{login:'me'},state:'PENDING',body:'Draft body',commit_id:f.head}]:[])]],'repos/a/b/pulls/7/reviews/99/comments':[[{id:1,path:'file.txt',line:1,body:'Check the edge case.'}]],'repos/a/b/pulls/7/comments':[[{body:'Inline discussion',path:'file.txt',line:1}]],'repos/a/b/issues/5':{title:'Linked issue',body:'Acceptance criteria'},'repos/a/b/issues/5/comments':[[{body:'Issue discussion'}]]};result=responses[a.at(-1).split('?')[0]];if(result===undefined)process.exit(1);}
-console.log(JSON.stringify(result));
-`,
-    { mode: 0o755 },
-  );
-  await fs.writeFile(
-    path.join(bin, 'codex'),
-    `#!/usr/bin/env node
-const fs=require('fs'),rl=require('readline').createInterface({input:process.stdin});let count=0;const directories=new Map();if(process.argv[2]==='--version'){console.log('codex test');process.exit(0)}rl.on('line',line=>{const m=JSON.parse(line);if(!m.id)return;let result={};fs.appendFileSync(process.env.REVIEW_CALLS,JSON.stringify(m)+'\\n');if(m.method==='thread/start'){const id='thread-'+(++count);directories.set(id,m.params.cwd);result={thread:{id}};}if(m.method==='thread/read')result={thread:{id:m.params.threadId,cwd:directories.get(m.params.threadId)||process.env.REVIEW_PROJECT}};if(m.method==='turn/start'){const cwd=directories.get(m.params.threadId)||process.env.REVIEW_PROJECT;if(m.params.input[0].text.includes('user selected Fix CI')){const cp=require('child_process');cp.execFileSync('/usr/bin/git',['-C',cwd,'merge','--ff-only',JSON.parse(fs.readFileSync(process.env.REVIEW_FIXTURE,'utf8')).head]);fs.appendFileSync(cwd+'/file.txt',' CI fix');require('child_process').execFileSync('/usr/bin/git',['-C',cwd,'-c','user.name=Test','-c','user.email=test@example.com','-c','commit.gpgsign=false','commit','-qam','fix: repair CI']);}fs.appendFileSync(process.env.REVIEW_PROMPTS,JSON.stringify(m.params.input[0].text)+'\\n');setTimeout(()=>console.log(JSON.stringify({method:'turn/completed',params:{threadId:m.params.threadId,turn:{status:'completed'}}})),20)}console.log(JSON.stringify({id:m.id,result}));});
-`,
-    { mode: 0o755 },
-  );
-  await fs.writeFile(
-    path.join(bin, 'git'),
-    `#!/usr/bin/env node
-const fs=require('fs'),a=process.argv.slice(2);if(a.includes('push')){fs.appendFileSync(process.env.REVIEW_PUSHES,JSON.stringify(a)+'\\n');process.exit(0)}const r=require('child_process').spawnSync('/usr/bin/git',a,{stdio:'inherit'});process.exit(r.status??1);
-`,
-    { mode: 0o755 },
-  );
+  for (const tool of ['gh', 'codex', 'git']) {
+    const target = path.join(bin, tool);
+    await fs.copyFile(
+      new URL('./fixtures/review-workflow-cli.js', import.meta.url),
+      target,
+    );
+    await fs.chmod(target, 0o755);
+  }
   const promptsFile = path.join(tmp, 'prompts.jsonl');
   const port = 46000 + Math.floor(Math.random() * 10000);
   const child = spawn(process.execPath, ['server/index.js'], {
@@ -157,17 +165,42 @@ const fs=require('fs'),a=process.argv.slice(2);if(a.includes('push')){fs.appendF
     }
     return result;
   };
-  const prompts = async () => {
+  const readLines = async (file) => {
     try {
-      return (await fs.readFile(promptsFile, 'utf8'))
+      return (await fs.readFile(file, 'utf8'))
         .trim()
         .split('\n')
         .filter(Boolean)
         .map(JSON.parse);
-    } catch {
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
       return [];
     }
   };
+  const prompts = () => readLines(promptsFile);
+  const writes = () => readLines(path.join(tmp, 'writes.log'));
+  const autoTasks = async () => {
+    const state = JSON.parse(
+      await fs.readFile(path.join(dataDir, 'state.json'), 'utf8'),
+    );
+    return Object.values(state.preparations || {}).filter((task) => task.auto);
+  };
+  async function waitForAutoTask(
+    index,
+    status,
+    requireError = status === 'pending',
+  ) {
+    let task;
+    for (let i = 0; i < 150; i++) {
+      task = (await autoTasks())[index];
+      if (task?.status === status && (!requireError || task.error)) return task;
+      await delay(40);
+    }
+    const details = await (await fetch(base + '/status')).json();
+    assert.fail(
+      `Expected Auto task ${index} to reach ${status}. Latest: ${JSON.stringify(task || details.autoRuns)}`,
+    );
+  }
   const status = await (await fetch(base + '/status')).json();
   assert.equal(status.settings.publishReviews, false);
   let r = await post('/job', {
@@ -224,32 +257,141 @@ const fs=require('fs'),a=process.argv.slice(2);if(a.includes('push')){fs.appendF
   assert.equal((await prompts()).length, 2);
   fixture.fail = false;
   fixture.auto = true;
+  fixture.previouslyReviewed = false;
   await updateFixture();
   await post('/auto', { enabled: true });
-  for (let i = 0; i < 80; i++) {
-    texts = await prompts();
-    if (texts.length >= 3) break;
-    await delay(40);
-  }
+  const draft = await waitForAutoTask(0, 'complete');
+  assert.equal(draft.action, 'review');
+  texts = await prompts();
   assert.equal(texts.length, 3);
-  assert.match(texts[2], /Do not submit or publish/);
+  assert.match(
+    texts[2],
+    /Do not create draft reviews, submit or publish reviews/,
+  );
+  assert.match(
+    texts[2],
+    /git diff refs\/opusdesk\/base\.\.\.refs\/opusdesk\/head/,
+  );
   assert.doesNotMatch(texts[2], /Additional review preferences/);
-  await post('/auto', { enabled: false });
+  const automaticallyStartedTurns = (
+    await readLines(path.join(tmp, 'calls.jsonl'))
+  ).filter(
+    (call) => call.method === 'turn/start' && call.params.threadId === draft.id,
+  );
+  assert.equal(automaticallyStartedTurns.length, 1);
+  assert.equal(
+    automaticallyStartedTurns[0].params.sandboxPolicy.networkAccess,
+    false,
+  );
+  let requests = await writes();
+  assert.equal(requests.length, 1);
+  assert.ok(requests[0].args.includes('repos/a/b/pulls/7/reviews'));
+  assert.equal(requests[0].body.commit_id, reviewCommit);
+  assert.equal(
+    requests[0].body.event,
+    undefined,
+    'omit event for a pending GitHub review',
+  );
+  assert.match(
+    requests[0].body.comments[0].body,
+    /```suggestion\ncomplete\n```/,
+  );
+  await post('/github/refresh', {});
+  assert.equal((await autoTasks()).length, 1);
+  assert.equal((await writes()).length, 1);
+
   assert.equal((await post('/settings', { publishReviews: true })).status, 400);
-  fixture.head = 'head2';
+  assert.equal(
+    (
+      await post('/settings', {
+        autoActions: { rereview: 'publish' },
+        workflows: {
+          rereview: { agent: 'codex', model: 'review-model', effort: 'high' },
+        },
+      })
+    ).status,
+    200,
+  );
+  fixture.previouslyReviewed = true;
+  fixture.response = '2026-01-03T00:00:00Z';
+  await updateFixture();
+  await post('/github/refresh', {});
+  const live = await waitForAutoTask(1, 'published');
+  assert.equal(live.action, 'rereview');
+  texts = await prompts();
+  assert.equal(texts.length, 4);
+  assert.match(texts[3], /^Re-review/);
+  assert.match(texts[3], /later replies even if the head is unchanged/);
+  requests = await writes();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].body.event, 'COMMENT');
+  assert.equal(requests[1].body.commit_id, reviewCommit);
+  assert.deepEqual(requests[1].body.comments, requests[0].body.comments);
+  const rereviewCalls = await readLines(path.join(tmp, 'calls.jsonl'));
+  assert.ok(
+    rereviewCalls.some(
+      (call) =>
+        call.method === 'thread/start' && call.params.model === 'review-model',
+    ),
+  );
+  assert.ok(
+    rereviewCalls.some(
+      (call) =>
+        call.method === 'turn/start' &&
+        call.params.threadId === live.id &&
+        call.params.effort === 'high',
+    ),
+  );
+
+  fixture.response = '2026-01-04T00:00:00Z';
+  fixture.stale = true;
+  await updateFixture();
+  await post('/github/refresh', {});
+  const stale = await waitForAutoTask(2, 'pending');
+  assert.match(stale.error, /PR changed/);
+  assert.equal((await writes()).length, 2);
+  await post('/approvals/' + stale.key + '/dismiss', {});
+
+  fixture.response = '2026-01-05T00:00:00Z';
+  fixture.stale = false;
+  fixture.pending = true;
+  fixture.latePending = true;
+  await updateFixture();
+  await post('/github/refresh', {});
+  const existing = await waitForAutoTask(3, 'pending');
+  assert.match(existing.error, /pending GitHub review exists/);
+  assert.equal((await writes()).length, 2);
+  await post('/approvals/' + existing.key + '/dismiss', {});
+
+  fixture.response = '2026-01-06T00:00:00Z';
+  fixture.pending = false;
+  fixture.latePending = false;
+  fixture.delay = 1000;
+  await updateFixture();
+  await post('/github/refresh', {});
+  await waitForAutoTask(4, 'running');
+  await post('/auto', { enabled: false });
+  const stopped = await waitForAutoTask(4, 'pending', false);
+  assert.equal(stopped.automaticEffect, undefined);
+  assert.equal((await writes()).length, 2);
+  await post('/approvals/' + stopped.key + '/dismiss', {});
+
+  fixture.previouslyReviewed = false;
+  fixture.response = undefined;
+  fixture.head = newCommit;
   await updateFixture();
   await post('/auto', { enabled: true });
-  for (let i = 0; i < 80; i++) {
-    texts = await prompts();
-    if (texts.length >= 4) break;
-    await delay(40);
-  }
-  assert.equal(texts.length, 4);
-  assert.match(texts[3], /Do not submit or publish/);
+  await waitForAutoTask(5, 'running');
+  fixture.withdrawn = true;
+  await updateFixture();
+  const withdrawn = await waitForAutoTask(5, 'pending');
+  assert.match(withdrawn.error, /review request or its latest replies changed/);
+  assert.equal((await writes()).length, 2);
   await post('/auto', { enabled: false });
+
   fixture.auto = false;
   fixture.pending = true;
-  fixture.head = 'head3';
+  fixture.delay = 0;
   await updateFixture();
   r = await post('/job', {
     url: 'https://github.com/a/b/pull/7',
@@ -269,7 +411,7 @@ const fs=require('fs'),a=process.argv.slice(2);if(a.includes('push')){fs.appendF
     await fetch(base + '/approvals/' + pending.key)
   ).json();
   assert.equal(preview.comments[0].body, 'Check the edge case.');
-  await assert.rejects(fs.access(path.join(tmp, 'writes.log')));
+  assert.equal((await writes()).length, 2);
   const published = await post('/approvals/' + pending.key + '/publish', {});
   assert.equal(published.status, 200);
   assert.match(

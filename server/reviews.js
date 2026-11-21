@@ -1,4 +1,11 @@
 import { canonicalGithubUrl, githubUrl, run, getGithubHost } from './core.js';
+import fs from 'node:fs/promises';
+import { constants } from 'node:fs';
+
+const referenceText = (pr, discussion) =>
+  [pr.body || '', ...discussion.map((comment) => comment.body || '')].join(
+    '\n',
+  );
 
 export function linkedIssueUrls(pr, repository, discussion = []) {
   const urls = new Set();
@@ -8,9 +15,7 @@ export function linkedIssueUrls(pr, repository, discussion = []) {
         urls.add(canonicalGithubUrl(issue.url));
     } catch {}
   }
-  const text = [pr.body || '', ...discussion.map((c) => c.body || '')].join(
-    '\n',
-  );
+  const text = referenceText(pr, discussion);
   for (const match of text.matchAll(
     /https:\/\/[\w.-]+\/[\w.-]+\/[\w.-]+\/issues\/\d+/gi,
   )) {
@@ -24,6 +29,18 @@ export function linkedIssueUrls(pr, repository, discussion = []) {
     urls.add(
       `https://${getGithubHost()}/${match[1] || repository}/issues/${Number(match[2])}`,
     );
+  }
+  return [...urls];
+}
+
+function linkedPullUrls(pr, discussion) {
+  const urls = new Set();
+  for (const match of referenceText(pr, discussion).matchAll(
+    /https:\/\/[\w.-]+\/[\w.-]+\/[\w.-]+\/pull\/\d+/gi,
+  )) {
+    try {
+      urls.add(canonicalGithubUrl(match[0]));
+    } catch {}
   }
   return [...urls];
 }
@@ -63,38 +80,85 @@ export async function loadReviewContext(url, execute = run) {
     pages(`repos/${repo}/pulls/${number}/comments`),
     json(['api', 'user']),
   ]);
-  const issueUrls = linkedIssueUrls(pr, repo, [
-    ...comments,
-    ...reviews,
-    ...inlineComments,
-  ]);
+  const discussion = [...comments, ...reviews, ...inlineComments];
+  const linked = new Map();
+  for (const issueUrl of linkedIssueUrls(pr, repo, discussion)) {
+    const target = githubUrl(issueUrl);
+    linked.set(`${target.repo.toLowerCase()}#${target.number}`, issueUrl);
+  }
+  for (const pullUrl of linkedPullUrls(pr, discussion)) {
+    const target = githubUrl(pullUrl);
+    linked.set(`${target.repo.toLowerCase()}#${target.number}`, pullUrl);
+  }
+  linked.delete(`${repo.toLowerCase()}#${number}`);
+  const references = [...linked.values()];
+  linked.set(`${repo.toLowerCase()}#${number}`, url);
   const issues = [];
   const unavailableIssues = [];
+  const relatedPullRequests = [];
+  const unavailablePullRequests = [];
+  async function loadRelatedPullRequest(target, pullUrl) {
+    try {
+      const pull = await json([
+        'api',
+        `repos/${target.repo}/pulls/${target.number}`,
+      ]);
+      relatedPullRequests.push({
+        url: pullUrl,
+        title: pull.title,
+        body: pull.body,
+        state: pull.merged_at ? 'merged' : pull.state,
+        mergedAt: pull.merged_at,
+        mergeCommit: pull.merge_commit_sha,
+        baseRef: pull.base?.ref,
+        headCommit: pull.head?.sha,
+      });
+    } catch {
+      unavailablePullRequests.push(pullUrl);
+    }
+  }
   // Bound concurrency without silently dropping linked issues.
   let cursor = 0;
   await Promise.all(
-    Array.from({ length: Math.min(4, issueUrls.length) }, async () => {
-      while (cursor < issueUrls.length) {
-        const issueUrl = issueUrls[cursor++];
-        const target = githubUrl(issueUrl);
+    Array.from({ length: Math.min(4, references.length) }, async () => {
+      while (cursor < references.length) {
+        const reference = references[cursor++];
+        const target = githubUrl(reference);
+        if (target.kind === 'pull') {
+          await loadRelatedPullRequest(target, reference);
+          continue;
+        }
         try {
           const issue = await json([
             'api',
             `repos/${target.repo}/issues/${target.number}`,
           ]);
-          if (issue.pull_request) continue;
+          if (issue.pull_request) {
+            await loadRelatedPullRequest(
+              target,
+              `https://${getGithubHost()}/${target.repo}/pull/${target.number}`,
+            );
+            continue;
+          }
           const discussion = await pages(
             `repos/${target.repo}/issues/${target.number}/comments`,
           );
+          for (const relatedUrl of linkedPullUrls(issue, discussion)) {
+            const related = githubUrl(relatedUrl);
+            const key = `${related.repo.toLowerCase()}#${related.number}`;
+            if (linked.has(key)) continue;
+            linked.set(key, relatedUrl);
+            references.push(relatedUrl);
+          }
           issues.push({
-            url: issueUrl,
+            url: reference,
             title: issue.title,
             body: issue.body,
             state: issue.state,
             comments: discussion.map(comment),
           });
         } catch {
-          unavailableIssues.push(issueUrl);
+          unavailableIssues.push(reference);
         }
       }
     }),
@@ -119,7 +183,11 @@ export async function loadReviewContext(url, execute = run) {
       submittedAt: r.submitted_at,
     })),
     issues: issues.sort((a, b) => a.url.localeCompare(b.url)),
-    unavailableIssues,
+    unavailableIssues: unavailableIssues.sort(),
+    relatedPullRequests: relatedPullRequests.sort((a, b) =>
+      a.url.localeCompare(b.url),
+    ),
+    unavailablePullRequests: unavailablePullRequests.sort(),
     reviewedByMe: hasSubmittedReview(reviews, viewer.login),
   };
 }
@@ -147,4 +215,77 @@ export async function loadReviewState(url, execute = run) {
     execute('gh', ['api', 'user']).then(JSON.parse),
   ]);
   return { reviewedByMe: hasSubmittedReview(pages.flat(), viewer.login) };
+}
+
+const maxArtifactBytes = 1024 * 1024;
+
+export async function readReviewArtifact(file) {
+  const handle = await fs.open(
+    file,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  let artifact;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > maxArtifactBytes)
+      throw Error('The review artifact must be a file smaller than 1 MB');
+    const buffer = Buffer.alloc(stat.size + 1);
+    const result = await handle.read({ buffer });
+    if (result.bytesRead !== stat.size)
+      throw Error('The review artifact changed while being read');
+    artifact = JSON.parse(buffer.toString('utf8', 0, result.bytesRead));
+  } finally {
+    await handle.close();
+  }
+  if (
+    !Array.isArray(artifact?.comments) ||
+    artifact.comments.length > 30 ||
+    (artifact.body !== undefined && !validBody(artifact.body, 8000))
+  )
+    throw Error('Invalid review artifact');
+
+  const seen = new Set();
+  const comments = artifact.comments.map((finding) => {
+    if (!finding || typeof finding !== 'object')
+      throw Error('Invalid inline review comment');
+    const { path, line, start_line, body } = finding;
+    if (
+      typeof path !== 'string' ||
+      path.length > 4096 ||
+      // GitHub expects a printable repository-relative path.
+      // eslint-disable-next-line no-control-regex
+      /[\u0000-\u001f\u007f]/.test(path) ||
+      path.split('/').some((part) => !part || part === '.' || part === '..') ||
+      !validLine(line) ||
+      (start_line !== undefined &&
+        (!validLine(start_line) || start_line >= line)) ||
+      !validBody(body, 12000) ||
+      !body.trim()
+    )
+      throw Error('Invalid inline review comment');
+    const key = JSON.stringify([path, line]);
+    if (seen.has(key))
+      throw Error('Review artifact contains duplicate comment locations');
+    seen.add(key);
+    return {
+      path,
+      line,
+      side: 'RIGHT',
+      ...(start_line !== undefined && { start_line, start_side: 'RIGHT' }),
+      body: body.trim(),
+    };
+  });
+  return { body: artifact.body?.trim() || '', comments };
+}
+
+function validLine(value) {
+  return Number.isSafeInteger(value) && value > 0 && value <= 2147483647;
+}
+
+function validBody(value, maxLength) {
+  return (
+    typeof value === 'string' &&
+    value.length <= maxLength &&
+    !value.includes('\0')
+  );
 }

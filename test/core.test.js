@@ -1,11 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  githubUrl,
-  jobPrompt,
-  searchText,
-  autoCandidates,
-} from '../server/core.js';
+import { githubUrl, jobPrompt, searchText } from '../server/core.js';
 test('accepts valid PR and issue links, rejects non-GitHub and malformed links', () => {
   assert.deepEqual(githubUrl('https://github.com/a/b/pull/42'), {
     repo: 'a/b',
@@ -71,37 +66,6 @@ test('search matches all terms case insensitively', () => {
     true,
   );
   assert.equal(searchText({ title: 'Fix error' }, 'missing'), false);
-});
-
-test('auto mode deduplicates events by PR revision and issue identity', () => {
-  const cache = {
-    prs: [
-      {
-        url: 'https://github.com/a/b/pull/1',
-        roles: ['authored', 'review'],
-        headRefOid: 'aaa',
-        baseRefOid: 'bbb',
-        mergeable: 'CONFLICTING',
-        checkState: 'FAILURE',
-        failedChecks: ['test'],
-      },
-    ],
-    issues: [{ url: 'https://github.com/a/b/issues/2' }],
-  };
-  const first = autoCandidates(cache);
-  assert.deepEqual(
-    first.map((x) => x.kind),
-    ['conflicts', 'ci', 'review', 'issue'],
-  );
-  const known = Object.fromEntries(
-    first.map((x) => [x.key, { status: 'completed' }]),
-  );
-  assert.equal(autoCandidates(cache, known).length, 0);
-  cache.prs[0].headRefOid = 'ccc';
-  assert.deepEqual(
-    autoCandidates(cache, known).map((x) => x.kind),
-    ['conflicts', 'ci', 'review'],
-  );
 });
 
 test('GitHub Enterprise host is validated and used for URLs', async () => {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { claudeThread } from '../server/claude.js';
+import { claudeAutomationArguments, claudeThread } from '../server/claude.js';
 
 test('Claude history tolerates incomplete lines and renders text content only', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'opus-claude-'));
@@ -41,4 +41,26 @@ test('Claude history tolerates incomplete lines and renders text content only', 
     ['userMessage', 'agentMessage'],
   );
   assert.equal(thread.turns[0].items[1].text, 'Reviewed');
+});
+
+test('Claude Auto mode requires fail-closed sandbox support and enables local tools only', () => {
+  assert.throws(
+    () => claudeAutomationArguments('2.1.318 (Claude Code)'),
+    /2.1.319/,
+  );
+  assert.throws(() => claudeAutomationArguments('unknown'), /2.1.319/);
+  const args = claudeAutomationArguments('2.1.319 (Claude Code)');
+  assert.ok(!args.includes('--dangerously-skip-permissions'));
+  const option = (name) => args[args.indexOf(name) + 1];
+  assert.equal(option('--setting-sources'), '');
+  assert.equal(option('--permission-mode'), 'acceptEdits');
+  assert.equal(option('--tools'), 'Bash,Read,Glob,Grep,Edit,Write');
+  assert.deepEqual(JSON.parse(option('--mcp-config')), { mcpServers: {} });
+  const settings = JSON.parse(option('--settings'));
+  assert.equal(settings.disableAllHooks, true);
+  assert.equal(settings.disableClaudeAiConnectors, true);
+  assert.equal(settings.sandbox.failIfUnavailable, true);
+  assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
+  assert.equal(settings.sandbox.network.strictAllowlist, true);
+  assert.deepEqual(settings.sandbox.network.allowedDomains, []);
 });

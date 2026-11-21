@@ -261,11 +261,12 @@ test('local API serves GitHub and Codex data, routes questions, and rejects cros
       }),
     ),
   );
+  const ids = await Promise.all(jobs.map((x) => x.json()));
   assert.deepEqual(
     jobs.map((x) => x.status),
     [200, 200],
+    JSON.stringify(ids),
   );
-  const ids = await Promise.all(jobs.map((x) => x.json()));
   assert.notEqual(ids[0].id, ids[1].id);
   status = await (await fetch(base + '/api/status')).json();
   assert.equal(Object.keys(status.worktreeProjects).length, 3);
@@ -311,31 +312,18 @@ test('local API serves GitHub and Codex data, routes questions, and rejects cros
     body: JSON.stringify({ enabled: true }),
   });
   assert.equal(response.status, 200);
-  let autoState;
-  for (let i = 0; i < 70; i++) {
-    autoState = await (await fetch(base + '/api/status')).json();
-    if (
-      Object.values(autoState.autoRuns || {}).some(
-        (x) => x.status === 'running',
-      )
-    )
-      break;
-    await delay(40);
-  }
-  assert.equal(
-    Object.values(autoState.autoRuns || {}).filter(
-      (x) => x.kind === 'issue' && x.status === 'running',
-    ).length,
-    1,
-  );
   await fetch(base + '/api/github/refresh', {
     method: 'POST',
     headers,
     body: '{}',
   });
-  await delay(100);
-  autoState = await (await fetch(base + '/api/status')).json();
-  assert.equal(Object.keys(autoState.autoRuns || {}).length, 1);
+  const autoState = await (await fetch(base + '/api/status')).json();
+  assert.equal(autoState.autoEnabled, true);
+  assert.equal(
+    Object.keys(autoState.autoRuns || {}).length,
+    0,
+    'Auto mode never implements assigned issues',
+  );
   await fetch(base + '/api/auto', {
     method: 'POST',
     headers,
