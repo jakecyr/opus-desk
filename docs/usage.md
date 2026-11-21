@@ -1,6 +1,6 @@
 # Opus Desk usage
 
-A local-first dashboard for GitHub work and Codex sessions. Opus Desk runs on your machine and uses your existing `gh` and Codex CLI authentication. It does not run a hosted service or upload your conversation history to a third-party dashboard. GitHub and model-provider requests still go to those services when their CLIs operate.
+A local-first dashboard for GitHub work and Codex or Claude Code sessions. Opus Desk uses your existing local CLI authentication. GitHub and model-provider requests go to those services through the installed CLIs.
 
 ## Running the app
 
@@ -8,9 +8,11 @@ Use the [interactive installer](installation.md) or the [developer setup](../CON
 
 ## Current scope
 
-Opus Desk lists open PRs involving you, requests for your review, your authored PRs, assigned issues, and local Codex sessions. It can start and resume Codex sessions, route supported Codex questions and approvals, and launch contextual PR and issue tasks. PR actions require a local checkout. Draft-review creation is requested of the agent and depends on its tool access and GitHub permissions; inspect the agent output and GitHub before relying on it.
+Focus refreshes from GitHub and shows PRs that still need your attention. Pull Requests separates work you have to review, work already under review, and your own PRs. Use the status filters to find draft reviews, PRs waiting for a response, unresolved feedback, mergeable PRs, and failing checks. Paste a PR URL to review it or open its linked chat. Code repairs and issue actions use a local checkout. Reviews can fetch their own checkout.
 
-PR cards with failing checks show **Fix CI**. Clicking it resumes the PR's linked chat or starts a new one using the configured CI workflow agent. The agent inspects the current failures and job logs, fixes the problem, runs relevant checks, and commits locally. This action authorizes Opus Desk to push those commits to the existing PR source branch, including a fork branch. Before pushing, the app checks for a clean checkout, the original PR head in the commit ancestry, and an unchanged remote PR head. Push failures appear on Focus for inspection and retry. Background Auto mode still requires publishing approval.
+In Settings, set the GitHub hostname for an Enterprise installation and sign in to that host with `gh`. Orchestrator searches the messages and titles of local Codex and Claude chats across projects. Sort by recent activity or name, or start a chat in a project or folder. Change the model and reasoning for the next turn in the chat controls. Use **Steer** while Codex is working. Claude's **Stop and send** ends the active turn and resumes the same chat with your message. **Stop** is available for turns running under Opus Desk.
+
+PR cards with failing checks show **Fix CI**. Clicking it resumes the PR's linked chat or starts a new one using the configured CI workflow agent. The agent inspects the current failures and job logs, fixes the problem, runs relevant checks, and commits locally. This action authorizes Opus Desk to push those commits to the existing PR source branch, including a fork branch. Before pushing, the app checks for a clean checkout, the original PR head in the commit ancestry, and an unchanged remote PR head. Push failures appear on Focus for inspection and retry.
 
 PR and issue actions start in the background and keep you on the current page. Cards on Focus, Pull Requests, Issues, and Sprint show the current task with a spinner, disable their action buttons while it runs, and offer a Chat link. Other cards remain available. Duplicate requests for the same running workflow reuse its job; a different action on a busy item is blocked. New PR chats use separate worktrees by default. A linked chat whose checkout is already busy, or has uncommitted changes for a PR action, is replaced with an isolated chat.
 
@@ -18,7 +20,7 @@ Codex and Claude run under a separate detached agent host. Closing the browser, 
 
 Stop it with `npm run daemon -- stop` and check it with `npm run daemon -- status`. The detached daemon does not start automatically at login.
 
-Claude Code history and noninteractive turns are supported when its CLI is installed; this has not been tested on a machine with Claude installed. Claude default permission mode is not a sandbox guarantee, and interactive Claude permissions and questions are not supported in this version. Existing Codex Cloud chats, background desktop notifications, automatic worktree cleanup, comprehensive PR classification, and repository-wide issue discovery are not implemented yet. Opus Desk does not delete worktrees automatically. Some Codex questions and approvals may use protocol types this early build does not yet support.
+Claude Code history and noninteractive turns are available when its CLI is installed. Interactive questions and approvals use supported Codex protocol types. Opus Desk retains local worktrees for inspection.
 
 Agent permissions default to full access without approval, matching the requested local CLI aliases; sandbox mode remains selectable. The dangerous mode grants the agent broad local access without prompts. Review the selected mode before launching. Code and issue text are untrusted input to agents. All application state is stored at `~/.local/share/prquay/state.json` with user-only permissions.
 
@@ -36,7 +38,13 @@ The notification inbox is stored in this browser. Desktop notifications and the 
 
 ## Auto mode
 
-Auto mode defaults to off and runs only while the local daemon is running. When enabled, it watches GitHub for requested reviews, conflicts and failing checks on your PRs, unresolved review feedback on your PRs, and assigned issues. It starts one agent at a time in a new worktree and records the condition it handled to avoid repeating unchanged work. Auto mode prepares local commits, proposed PR details, and pending draft reviews. Finished work appears on Focus for you to inspect and explicitly publish. It does not schedule further work on the same item while that result awaits your decision. Turning it off stops new starts but does not cancel a task already running. It uses the configured agent permissions, which default to unrestricted access. Check the results before merging.
+Auto mode starts off and runs while the local daemon is running. It picks up requested reviews, replies to your reviews, and conflicts or failing checks on your own PRs. Each task runs in an isolated checkout pinned to the GitHub revision. Opus Desk runs one task at a time and records the trigger so repeated polls do not restart unchanged work.
+
+Open **Settings → Workflows** to choose **Off**, **Draft**, or **Publish** for each Auto action. First review and re-review default to creating a pending GitHub review. Conflict and CI fixes default to preparing local commits for approval. Addressing review comments automatically is also available and starts off. **Publish** opts that action into live GitHub review submission or pushing a tested fix to the existing PR branch. The app rechecks current settings and PR state before publishing. Turning off Auto stops new jobs and automatic publication. A running agent can finish preparing its result.
+
+Automatic turns use restricted shell access in the local CLI and get GitHub evidence before the turn starts. Tests that need unavailable dependencies or network access can leave a fix awaiting manual review. Automatic Claude turns require Claude Code 2.1.319 or later with working sandbox support.
+
+Configure **Settings → Code reviews** to choose the criteria, tone, and related repositories. Reviews prioritize verified defects, check exact dependency versions and release history where relevant, and use native GitHub suggestions for focused replacements. Optional nits are off by default.
 
 ## Terminal session guard
 
@@ -50,6 +58,6 @@ The Sprint page appears after you select a repository and one of its linked GitH
 
 ## Publishing approvals
 
-Focus shows prepared agent results. Review the proposed comments, description, or code diff, then click Publish to GitHub. The app rechecks the reviewed commit and pending comments or local commit before publishing. Changed drafts and new PR commits require refreshing or re-running the work. Draft review publication submits the entire pending review, including user-added drafts shown in the preview. Local worktrees are retained after publishing or dismissal.
+Focus shows prepared agent results. Review the proposed comments, description, or code diff, then click Publish to GitHub. The app rechecks the reviewed commit and pending comments or local commit before publishing. Changed drafts and new PR commits require refreshing or re-running the work. When you explicitly submit an existing GitHub draft, the full pending review is submitted. Automated publishing uses the findings from its own run and leaves pre-existing draft reviews for you to submit.
 
-This is the app's workflow publication policy, not an operating-system security boundary. Agents running with dangerous permissions retain full shell and network access. The prompts tell them to stop before publication; the app's publishing endpoints require an explicit user action. Fix CI provides that authorization when clicked and pushes the completed fix without a second approval. Use sandbox permissions when unrestricted agent access is unsuitable.
+Manual agents with full-access permissions retain shell and network access. Use sandbox permissions for manual work that should run with restricted filesystem and network access. Fix CI prepares changes for you to preview and publish from Focus.

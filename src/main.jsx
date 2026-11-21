@@ -14,31 +14,30 @@ import {
   Settings,
   Search,
   Plus,
-  ArrowUpRight,
   CircleCheck,
-  MessageCircle,
-  GitMerge,
   CircleAlert,
   ArrowRight,
-  Send,
-  ChevronRight,
-  FolderGit2,
   X,
   Bell,
   BellOff,
   Moon,
   Sun,
   Trash2,
-  Sparkles,
   ExternalLink,
 } from 'lucide-react';
 import './style.css';
 import opusMark from './assets/opus-mark.svg';
-import { ApprovalBoard, ApprovalPreview } from './Approvals.jsx';
+import { ApprovalPreview } from './Approvals.jsx';
 import { SettingsPage } from './SettingsPage.jsx';
 import { SessionModal } from './SessionModal.jsx';
+import { SessionNavigator, ChatControls, ChatInput } from './Orchestrator.jsx';
 import { SprintPage, IssueRow } from './Sprint.jsx';
-import { JobStatus, isJobBusy } from './JobStatus.jsx';
+import {
+  FocusPage,
+  PullActionDialog,
+  PullRequestPage,
+} from './PullRequests.jsx';
+import { pullUrlKey, queueForPull } from './pull-queues.js';
 const api = async (url, opts = {}) => {
   const r = await fetch('/api' + url, {
     ...opts,
@@ -101,8 +100,6 @@ function routeFor(page, chat) {
     ? `/sessions/${encodeURIComponent(chat)}`
     : routes[page] || routes.focus;
 }
-const wasReviewed = (pr) =>
-  !!pr?.reviewedByMe || !!pr?.roles?.includes('reviewed');
 function App() {
   const [page, setPage] = useState(() => readRoute().page),
     [status, S] = useState({
@@ -120,18 +117,18 @@ function App() {
     [filter, F] = useState('all'),
     [chat, C] = useState(() => readRoute().chat),
     [thread, Thread] = useState(null),
+    [chatControls, ChatControlState] = useState(null),
     [externalCheck, ExternalCheck] = useState(null),
     [requests, R] = useState([]),
     [modal, Modal] = useState(null),
     [error, E] = useState(''),
     [loading, L] = useState(false),
-    [sessionView, SessionView] = useState('active'),
+    [sessionView, SessionView] = useState('all'),
     [approvals, Approvals] = useState([]),
     [startingJobs, StartingJobs] = useState({}),
     [approvalKey, ApprovalKey] = useState(null),
-    [closedLimit, ClosedLimit] = useState(false),
-    [closed, Closed] = useState([]),
-    [showClosed, ShowClosed] = useState(false),
+    [pullAction, PullAction] = useState(null),
+    [pullOverrides, PullOverrides] = useState({}),
     [allIssues, AllIssues] = useState(null),
     [selectedIssues, SelectIssues] = useState([]),
     [cleanupSelected, CleanupSelected] = useState([]),
@@ -214,18 +211,10 @@ function App() {
     else sessionStorage.removeItem('opusdesk-cleanup');
   }, [cleanupJob]);
   const refresh = useCallback(async () => {
-    const sessionsRequest =
-      sessionView === 'all'
-        ? Promise.all([api('/sessions'), api('/sessions?archived=true')]).then(
-            ([a, b]) => ({ data: [...a.data, ...b.data] }),
-          )
-        : api(
-            '/sessions' + (sessionView === 'archived' ? '?archived=true' : ''),
-          );
     const rs = await Promise.allSettled([
       api('/status'),
       api('/github'),
-      sessionsRequest,
+      api('/sessions?archived=all'),
       api('/requests'),
       api('/approvals'),
     ]);
@@ -240,7 +229,7 @@ function App() {
     }
     if (rs[3].status === 'fulfilled') R(rs[3].value);
     if (rs[4].status === 'fulfilled') Approvals(rs[4].value.tasks || []);
-  }, [sessionView]);
+  }, []);
   useEffect(() => {
     let cancelled = false;
     async function loadModels() {
@@ -261,6 +250,7 @@ function App() {
     };
   }, []);
   const chatBody = useRef(null),
+    chatLoad = useRef(0),
     lastChat = useRef(null),
     followBottom = useRef(true);
   useEffect(() => {
@@ -279,6 +269,7 @@ function App() {
   useEffect(() => {
     refresh();
     const stream = new EventSource('/api/events');
+    let chatTimer;
     stream.onmessage = (e) => {
       const x = JSON.parse(e.data);
       let n = null;
@@ -293,7 +284,11 @@ function App() {
       if (x.method === 'turn/completed')
         n = {
           title:
-            x.params?.status === 'failed' ? 'Agent failed' : 'Agent finished',
+            (x.params?.turn?.status || x.params?.status) === 'interrupted'
+              ? 'Agent stopped'
+              : (x.params?.turn?.status || x.params?.status) === 'failed'
+                ? 'Agent failed'
+                : 'Agent finished',
           body: x.params?.error || 'Open the conversation',
           threadId: x.params.threadId,
         };
@@ -323,6 +318,7 @@ function App() {
         [
           'github/updated',
           'turn/completed',
+          'turn/started',
           'thread/started',
           'item/tool/requestUserInput',
           'item/commandExecution/requestApproval',
@@ -335,19 +331,28 @@ function App() {
       if (x.method === 'auto/changed' || x.method === 'auto/started') refresh();
       if (x.method === 'claude/error') E(x.params.error);
       if (x.method === 'turn/completed' && x.params?.error) E(x.params.error);
-      if (x.params?.threadId === chat) loadChat(chat);
+      if (chat && x.params?.threadId === chat) {
+        clearTimeout(chatTimer);
+        chatTimer = setTimeout(() => loadChat(chat), 120);
+      }
     };
-    return () => stream.close();
+    return () => {
+      clearTimeout(chatTimer);
+      stream.close();
+    };
   }, [refresh, chat, desktop]);
 
   async function loadChat(id) {
+    const request = ++chatLoad.current;
     try {
       const result = await api('/session/' + encodeURIComponent(id));
+      if (chatLoad.current !== request) return;
       Thread(result.thread);
       ExternalCheck(result.externalUse);
+      ChatControlState({ id, active: result.active, options: result.options });
       R(await api('/requests'));
     } catch (e) {
-      E(e.message);
+      if (chatLoad.current === request) E(e.message);
     }
   }
   useEffect(() => {
@@ -355,7 +360,10 @@ function App() {
     if (!chat) return;
     loadChat(chat);
     const timer = setInterval(() => loadChat(chat), 5000);
-    return () => clearInterval(timer);
+    return () => {
+      ++chatLoad.current;
+      clearInterval(timer);
+    };
   }, [chat]);
   const guard = async (fn) => {
     try {
@@ -515,20 +523,6 @@ function App() {
 
   const search = (obj) =>
     JSON.stringify(obj).toLowerCase().includes(query.toLowerCase());
-  const prs = [...data.prs, ...(showClosed ? closed : [])].filter(
-    (x) =>
-      search(x) &&
-      (filter === 'all' ||
-        x.roles?.includes(filter) ||
-        (filter === 'draft' && x.isDraft) ||
-        (filter === 'pending' && x.pendingReview) ||
-        (filter === 'conflicts' && x.mergeable === 'CONFLICTING') ||
-        (filter === 'ready' &&
-          x.reviewDecision === 'APPROVED' &&
-          x.mergeable === 'MERGEABLE' &&
-          x.checkState === 'SUCCESS' &&
-          !x.isDraft)),
-  );
   const issue = (allIssues || data.issues).filter(
     (x) => search(x) && (filter !== 'reply' || x.needsReply),
   );
@@ -545,8 +539,80 @@ function App() {
     ).values(),
   ].sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
   const activeReq = requests.filter((r) => r.params?.threadId === chat);
-  const unread = data.prs.filter((x) => x.roles?.includes('review'));
-  const mine = data.prs.filter((x) => x.roles?.includes('authored'));
+  const currentChat = thread?.id === chat ? thread : null;
+  const chatAgent =
+    chat?.startsWith('claude:') || currentChat?.agent === 'claude'
+      ? 'claude'
+      : 'codex';
+  const activeChat = chatControls?.id === chat && chatControls.active;
+  const archivedChat = sessions.some(
+    (session) => session.id === chat && session.archived,
+  );
+  const pullLinks = new Map(
+    Object.entries(status.links || {}).map(([url, id]) => [
+      pullUrlKey(url),
+      id,
+    ]),
+  );
+  const pullJobs = new Map(
+    Object.entries(jobsByUrl).map(([url, task]) => [pullUrlKey(url), task]),
+  );
+  for (const task of approvals) {
+    const key = pullUrlKey(task.url);
+    if (!key || task.status !== 'pending') continue;
+    const job = pullJobs.get(key);
+    pullJobs.set(key, {
+      ...job,
+      pendingTasks: [...(job.pendingTasks || []), task],
+    });
+  }
+  const unread = data.prs.filter(
+    (pr) =>
+      queueForPull(pr, pullJobs.get(pullUrlKey(pr.url))) === 'needs-review',
+  );
+  const openChat = (id) => {
+    C(id);
+    navigate('sessions');
+  };
+  const pullActions = {
+    runJob: job,
+    preview: ApprovalKey,
+    confirmAction: PullAction,
+    age,
+  };
+  function trackPull(pr) {
+    const key = pullUrlKey(pr.url);
+    PullOverrides((old) => {
+      if (!(key in old)) return old;
+      const next = { ...old };
+      delete next[key];
+      return next;
+    });
+    D((old) => ({
+      ...old,
+      prs: [pr, ...old.prs.filter((item) => pullUrlKey(item.url) !== key)],
+    }));
+  }
+  function pullActionChanged({ kind, pr }) {
+    const key = pullUrlKey(pr.url);
+    const change =
+      kind === 'merge'
+        ? { state: 'MERGED', readyToMerge: false }
+        : {
+            pendingReview: false,
+            pendingResponse: false,
+            reviewedByMe: true,
+            reviewedCurrentHead: true,
+          };
+    PullOverrides((old) => ({ ...old, [key]: { ...pr, ...change } }));
+    D((old) => ({
+      ...old,
+      prs: old.prs.map((item) =>
+        pullUrlKey(item.url) === key ? { ...item, ...change } : item,
+      ),
+    }));
+    void refresh();
+  }
   return (
     <div className="shell">
       <aside className="sidebar">
@@ -611,7 +677,7 @@ function App() {
               className={'auto-toggle ' + (status.autoEnabled ? 'on' : '')}
               disabled={!statusLoaded}
               aria-pressed={!!status.autoEnabled}
-              title="Auto mode prepares work in separate worktrees. You approve publishing on Focus."
+              title="Run configured workflows automatically"
               onClick={() =>
                 guard(async () => {
                   await post('/auto', { enabled: !status.autoEnabled });
@@ -715,7 +781,7 @@ function App() {
               className="button primary"
               onClick={() => Modal({ type: 'new' })}
             >
-              <Plus size={15} /> New session
+              <Plus size={15} /> New chat
             </button>
           </div>
         </header>
@@ -739,271 +805,28 @@ function App() {
             </div>
           )}
           {page === 'focus' && (
-            <>
-              <div className="heading">
-                <div>
-                  <h1>
-                    {new Date().getHours() < 12
-                      ? 'Good morning'
-                      : new Date().getHours() < 18
-                        ? 'Good afternoon'
-                        : 'Good evening'}
-                    <span className="dot">.</span>
-                  </h1>
-                  {data.updated &&
-                    !data.errors?.length &&
-                    !unread.length &&
-                    !mine.length &&
-                    !data.issues.length &&
-                    !approvals.length && (
-                      <p>You did it. Nothing needs your attention.</p>
-                    )}
-                </div>
-              </div>
-              <div className="stats">
-                <Stat
-                  icon={GitPullRequest}
-                  label="NEEDS YOUR REVIEW"
-                  value={data.updated ? unread.length : '—'}
-                  color="violet"
-                  onClick={() => {
-                    navigate('prs');
-                    F('review');
-                  }}
-                />
-                <Stat
-                  icon={GitMerge}
-                  label="YOUR OPEN PRS"
-                  value={data.updated ? mine.length : '—'}
-                  color="blue"
-                  onClick={() => {
-                    navigate('prs');
-                    F('authored');
-                  }}
-                />
-                <Stat
-                  icon={CircleDot}
-                  label="ASSIGNED ISSUES"
-                  value={data.updated ? data.issues.length : '—'}
-                  color="amber"
-                  onClick={() => navigate('issues')}
-                />
-                <Stat
-                  icon={MessagesSquare}
-                  label="RECENT SESSIONS"
-                  value={sessionsLoaded ? sessions.length : '—'}
-                  color="green"
-                  onClick={() => navigate('sessions')}
-                />
-              </div>
-              <ApprovalBoard
-                tasks={approvals}
-                openChat={(id) => {
-                  C(id);
-                  navigate('sessions');
-                }}
-                openPreview={ApprovalKey}
-              />
-              <div className="overview-grid">
-                <section className="panel">
-                  <div className="panel-head">
-                    <div>
-                      <h2>
-                        Needs your review{' '}
-                        <span className="count">{unread.length}</span>
-                      </h2>
-                    </div>
-                    <button
-                      className="text-btn"
-                      onClick={() => {
-                        navigate('prs');
-                        F('review');
-                      }}
-                    >
-                      View all <ArrowRight size={15} />
-                    </button>
-                  </div>
-                  {unread.length ? (
-                    unread.slice(0, 5).map((pr) => (
-                      <PRRow
-                        key={pr.url}
-                        pr={pr}
-                        linked={status.links?.[pr.url]}
-                        job={jobsByUrl[pr.url]}
-                        onJob={job}
-                        onChat={(id) => {
-                          C(id);
-                          navigate('sessions');
-                        }}
-                      />
-                    ))
-                  ) : (
-                    <Empty
-                      text={
-                        data.updated
-                          ? "You're all caught up on review requests."
-                          : 'Loading reviews…'
-                      }
-                    />
-                  )}
-                </section>
-                <section className="panel">
-                  <div className="panel-head">
-                    <div>
-                      <h2>Recent sessions</h2>
-                    </div>
-                    <button
-                      className="text-btn"
-                      onClick={() => navigate('sessions')}
-                    >
-                      View all <ArrowRight size={15} />
-                    </button>
-                  </div>
-                  {sessions.length ? (
-                    sessions.slice(0, 5).map((s) => (
-                      <SessionRow
-                        key={s.id}
-                        s={s}
-                        onClick={() => {
-                          C(s.id);
-                          navigate('sessions');
-                        }}
-                      />
-                    ))
-                  ) : (
-                    <Empty
-                      text={
-                        sessionsLoaded
-                          ? 'No recent sessions.'
-                          : 'Loading sessions…'
-                      }
-                    />
-                  )}
-                </section>
-              </div>
-              <div className="footnote">
-                <span className="pulse" /> GitHub{' '}
-                {data.updated
-                  ? `updated ${age(data.updated)}`
-                  : 'connecting'}{' '}
-              </div>
-            </>
+            <FocusPage
+              data={data}
+              jobs={pullJobs}
+              links={pullLinks}
+              approvals={approvals}
+              showPulls={() => navigate('prs')}
+              showIssues={() => navigate('issues')}
+              openChat={openChat}
+              {...pullActions}
+            />
           )}
           {page === 'prs' && (
-            <>
-              <div className="pr-page-head">
-                <h1>Pull requests</h1>
-                <div className="review-options">
-                  <label>
-                    Review agent{' '}
-                    <select
-                      aria-label="Default review agent"
-                      value={status.settings.workflows?.review?.agent || ''}
-                      onChange={(e) => {
-                        const value = e.target.value;
-                        guard(() =>
-                          post('/settings', {
-                            workflows: {
-                              ...status.settings.workflows,
-                              review: {
-                                ...status.settings.workflows?.review,
-                                agent: value,
-                              },
-                            },
-                          }),
-                        );
-                      }}
-                    >
-                      <option value="">
-                        Default (
-                        {status.settings.defaultAgent === 'claude'
-                          ? 'Claude'
-                          : 'Codex'}
-                        )
-                      </option>
-                      <option value="codex">Codex</option>
-                      <option
-                        value="claude"
-                        disabled={!status.available.claude}
-                      >
-                        Claude
-                        {status.available.claude ? '' : ' (not installed)'}
-                      </option>
-                    </select>
-                  </label>
-                  <button
-                    className="button"
-                    onClick={() => Modal({ type: 'review' })}
-                  >
-                    <Plus size={15} /> Review a PR
-                  </button>
-                </div>
-              </div>
-              <div className="toolbar">
-                <SearchBox
-                  value={query}
-                  set={Q}
-                  placeholder="Search PRs, repositories, authors, or numbers"
-                />
-              </div>
-              <div className="filter-pills">
-                {[
-                  ['all', 'All'],
-                  ['review', 'Review requested'],
-                  ['authored', 'Mine'],
-                  ['commented', 'Commented'],
-                  ['unreviewed', 'No reviews'],
-                  ['approved', 'Approved'],
-                  ['failing', 'Failing checks'],
-                  ['pending', 'Draft reviews'],
-                  ['conflicts', 'Conflicts'],
-                  ['ready', 'Ready to merge'],
-                  ['draft', 'Drafts'],
-                ].map(([v, l]) => (
-                  <button
-                    key={v}
-                    className={filter === v ? 'selected' : ''}
-                    aria-pressed={filter === v}
-                    onClick={() => F(v)}
-                  >
-                    {l}
-                  </button>
-                ))}
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={showClosed}
-                    onChange={(e) =>
-                      guard(async () => {
-                        ShowClosed(e.target.checked);
-                        if (e.target.checked) {
-                          const result = await api('/github/closed');
-                          Closed(result.items || []);
-                          ClosedLimit(result.limitReached);
-                        }
-                      })
-                    }
-                  />{' '}
-                  Include closed PRs
-                </label>
-              </div>
-              {showClosed && closedLimit && (
-                <p className="muted">
-                  Showing the 1,000 most recently updated closed PRs, GitHub’s
-                  search limit.
-                </p>
-              )}
-              <PRBoard
-                prs={prs}
-                links={status.links || {}}
-                job={job}
-                jobs={jobsByUrl}
-                openChat={(id) => {
-                  C(id);
-                  navigate('sessions');
-                }}
-              />
-            </>
+            <PullRequestPage
+              pulls={data.prs}
+              jobs={pullJobs}
+              links={pullLinks}
+              overrides={pullOverrides}
+              api={api}
+              post={post}
+              onTrack={trackPull}
+              {...pullActions}
+            />
           )}
 
           {page === 'issues' && (
@@ -1271,54 +1094,36 @@ function App() {
             <>
               <h1 className="sr-only">Orchestrator</h1>
               <div className="sessions-layout">
-                <section className="panel session-list">
-                  <div className="session-toolbar">
-                    <SearchBox
-                      value={query}
-                      set={Q}
-                      placeholder="Search sessions..."
-                    />
-                    <select
-                      className="session-filter"
-                      aria-label="Session visibility"
-                      value={sessionView}
-                      onChange={(e) => SessionView(e.target.value)}
-                    >
-                      <option value="active">Active</option>
-                      <option value="archived">Archived</option>
-                      <option value="all">Both</option>
-                    </select>
-                  </div>
-                  <div className="session-scroll">
-                    <SessionGroups
-                      sessions={sessions.filter(search)}
-                      projects={status.projects}
-                      worktrees={status.worktreeProjects || {}}
-                      chat={chat}
-                      select={C}
-                      requests={requests}
-                      collapsed={collapsedGroups}
-                      setCollapsed={CollapsedGroups}
-                    />
-                    {!sessions.length && <Empty text="No sessions found." />}
-                  </div>
-                </section>
+                <SessionNavigator
+                  api={api}
+                  sessions={sessions}
+                  loaded={sessionsLoaded}
+                  projects={status.projects}
+                  worktrees={status.worktreeProjects || {}}
+                  chat={chat}
+                  select={C}
+                  requests={requests}
+                  collapsed={collapsedGroups}
+                  setCollapsed={CollapsedGroups}
+                  view={sessionView}
+                  setView={SessionView}
+                  openNew={(target) => Modal({ type: 'new', ...target })}
+                  age={age}
+                />
                 <section className="panel chat-panel">
                   {chat ? (
                     <>
                       <div className="chat-head">
                         <div>
                           <span className="section-kicker">
-                            {chat.startsWith('claude:') ||
-                            thread?.agent === 'claude'
-                              ? 'CLAUDE CODE'
-                              : 'CODEX'}{' '}
-                            · LOCAL SESSION
+                            {chatAgent === 'claude' ? 'Claude Code' : 'Codex'}
                           </span>
                           <h2>
-                            {thread?.name || thread?.preview || 'Conversation'}
+                            {currentChat?.name ||
+                              currentChat?.preview ||
+                              'Conversation'}
                           </h2>
-                          <small>{thread?.cwd}</small>
+                          <small>{currentChat?.cwd}</small>
                           <div className="chat-links">
                             {Object.entries(status.links || {})
                               .filter(([, id]) => id === chat)
@@ -1336,19 +1141,54 @@ function App() {
                               ))}
                           </div>
                         </div>
-                        <button
-                          className="icon-btn"
-                          title="Archive session"
-                          onClick={() =>
+                        <ChatControls
+                          key={chat}
+                          active={activeChat}
+                          agent={chatAgent}
+                          options={
+                            chatControls?.id === chat
+                              ? chatControls.options
+                              : null
+                          }
+                          models={models}
+                          loading={loading}
+                          stop={() =>
                             guard(async () => {
-                              await post('/session/' + chat + '/archive');
-                              C(null);
-                              Thread(null);
+                              await post(
+                                '/session/' +
+                                  encodeURIComponent(chat) +
+                                  '/interrupt',
+                              );
+                              await loadChat(chat);
                             })
                           }
-                        >
-                          <X size={17} />
-                        </button>
+                          save={(options) =>
+                            guard(async () => {
+                              await post(
+                                '/session/' +
+                                  encodeURIComponent(chat) +
+                                  '/options',
+                                options,
+                              );
+                              await loadChat(chat);
+                            })
+                          }
+                          archive={
+                            !archivedChat &&
+                            (chatAgent === 'codex' || chat.startsWith('draft:'))
+                              ? () =>
+                                  guard(async () => {
+                                    await post(
+                                      '/session/' +
+                                        encodeURIComponent(chat) +
+                                        '/archive',
+                                    );
+                                    C(null);
+                                    Thread(null);
+                                  })
+                              : null
+                          }
+                        />
                       </div>
                       <div
                         className="chat-body"
@@ -1359,21 +1199,17 @@ function App() {
                             x.scrollHeight - x.scrollTop - x.clientHeight < 80;
                         }}
                       >
-                        {thread?.id === chat &&
-                          thread?.turns
-                            ?.flatMap((t) => t.items || [])
-                            .map((item, i) => (
-                              <ChatItem
-                                key={item.id || i}
-                                item={item}
-                                agent={
-                                  chat.startsWith('claude:') ||
-                                  thread?.agent === 'claude'
-                                    ? 'Claude'
-                                    : 'Codex'
-                                }
-                              />
-                            ))}
+                        {currentChat?.turns
+                          ?.flatMap((t) => t.items || [])
+                          .map((item, i) => (
+                            <ChatItem
+                              key={item.id || i}
+                              item={item}
+                              agent={
+                                chatAgent === 'claude' ? 'Claude' : 'Codex'
+                              }
+                            />
+                          ))}
                         {activeReq.map((r) => (
                           <Request
                             key={r.id}
@@ -1387,7 +1223,8 @@ function App() {
                           />
                         ))}
                       </div>
-                      {externalCheck &&
+                      {currentChat &&
+                        externalCheck &&
                         (externalCheck.blocked || !externalCheck.available) && (
                           <div className="external-warning">
                             {externalCheck.blocked
@@ -1396,8 +1233,12 @@ function App() {
                           </div>
                         )}
                       <ChatInput
+                        key={chat}
+                        active={activeChat}
+                        agent={chatAgent}
                         disabled={
                           loading ||
+                          !currentChat ||
                           !externalCheck ||
                           externalCheck.blocked ||
                           !externalCheck.available
@@ -1408,12 +1249,11 @@ function App() {
                               '/session/' +
                                 encodeURIComponent(chat) +
                                 '/message',
-                              { text },
+                              { text, mode: activeChat ? 'steer' : 'send' },
                             );
                             if (result.id !== chat) {
                               followBottom.current = true;
                               C(result.id);
-                              await loadChat(result.id);
                             } else await loadChat(chat);
                           })
                         }
@@ -1424,12 +1264,12 @@ function App() {
                       <div className="empty-art">
                         <MessagesSquare size={24} />
                       </div>
-                      <h2>Choose a session</h2>
+                      <h2>Choose a chat</h2>
                       <button
                         className="button"
                         onClick={() => Modal({ type: 'new' })}
                       >
-                        <Plus size={15} /> New session
+                        <Plus size={15} /> New chat
                       </button>
                     </div>
                   )}
@@ -1483,6 +1323,14 @@ function App() {
           }}
         />
       )}
+      {pullAction && (
+        <PullActionDialog
+          action={pullAction}
+          close={() => PullAction(null)}
+          post={post}
+          onChanged={pullActionChanged}
+        />
+      )}
       {cleanupJob && (
         <div className="cleanup-progress" role="status">
           <span className={cleanupJob.status === 'running' ? 'spinner' : ''} />
@@ -1504,18 +1352,11 @@ function App() {
           close={() => Modal(null)}
           status={status}
           models={models}
-          prs={data.prs}
           start={start}
           job={job}
           loading={loading}
-          openChat={(id) => {
-            Modal(null);
-            C(id);
-            navigate('sessions');
-          }}
           bulkIssues={bulkIssues}
           closeCleanup={closeCleanup}
-          api={api}
           commentIssue={(item, body) =>
             guard(async () => {
               await post('/issues/comment', { url: item.url, body });
@@ -1539,20 +1380,6 @@ function App() {
     </div>
   );
 }
-function Stat({ icon: Icon, label, value, color, onClick }) {
-  return (
-    <button onClick={onClick} className="stat">
-      <div className={'stat-icon ' + color}>
-        <Icon size={18} />
-      </div>
-      <div>
-        <span>{label}</span>
-        <b>{value}</b>
-      </div>
-      <ArrowUpRight className="stat-arrow" size={15} />
-    </button>
-  );
-}
 function SearchBox({ value, set, placeholder }) {
   return (
     <label className="search">
@@ -1563,257 +1390,6 @@ function SearchBox({ value, set, placeholder }) {
         placeholder={placeholder}
       />
     </label>
-  );
-}
-function PRBoard({ prs, links, job, openChat, jobs }) {
-  const lanes = [
-    ['Review requested', (p) => p.roles?.includes('review')],
-    ['My draft comments', (p) => p.pendingReview],
-    [
-      'In review by me',
-      (p) => p.roles?.includes('reviewed') || p.roles?.includes('commented'),
-    ],
-    ['My pull requests', (p) => p.roles?.includes('authored')],
-  ];
-  const baseLanes = [...lanes];
-  const inLane = (p) => baseLanes.some(([, f]) => f(p));
-  if (prs.some((p) => !inLane(p)))
-    lanes.push(['Other involvement', (p) => !inLane(p)]);
-  return (
-    <div className="pr-board">
-      {lanes.map(([title, match]) => {
-        const items = prs.filter(match);
-        return (
-          <section className="pr-lane" key={title}>
-            <div className="lane-heading">
-              <strong>{title}</strong>
-              <span>{items.length}</span>
-            </div>
-            <div className="lane-cards">
-              {items.length ? (
-                items.map((pr) => (
-                  <PRRow
-                    key={pr.url}
-                    pr={pr}
-                    linked={links[pr.url]}
-                    job={jobs?.[pr.url]}
-                    onJob={job}
-                    onChat={openChat}
-                  />
-                ))
-              ) : (
-                <div className="lane-empty">No pull requests</div>
-              )}
-            </div>
-          </section>
-        );
-      })}
-    </div>
-  );
-}
-function PRRow({ pr, linked, onJob, job }) {
-  const busy = isJobBusy(job);
-  return (
-    <div className="pr-row">
-      <div className="row-icon">
-        <GitPullRequest size={16} />
-      </div>
-      <div className="row-main row-main-button">
-        <a className="item-link" href={pr.url} target="_blank" rel="noreferrer">
-          {pr.title}
-        </a>
-        <div className="row-meta">
-          {repo(pr)} <span>#{pr.number}</span> · {pr.author?.login}
-        </div>
-      </div>
-      {pr.pendingReview && <span className="tag">Draft review</span>}
-      {pr.mergeable === 'CONFLICTING' && (
-        <span
-          className="tag warning"
-          title="GitHub reports conflicts; the number of conflicted files is unavailable without attempting a merge."
-        >
-          Conflicts
-        </span>
-      )}
-      {pr.checkState === 'FAILURE' && (
-        <span
-          className="tag warning"
-          title={
-            pr.failedChecks?.length
-              ? pr.failedChecks.join('\n')
-              : 'Failing checks; details unavailable'
-          }
-        >
-          {pr.failedChecks?.length
-            ? `${pr.failedChecks.length} checks failing`
-            : 'Checks failing'}
-        </span>
-      )}
-      {pr.isDraft && <span className="tag">Draft</span>}
-      {onJob && pr.state?.toUpperCase() === 'OPEN' && (
-        <div className="inline-actions">
-          <JobStatus job={job} linked={linked} />
-          <button
-            className="inline-action"
-            title={wasReviewed(pr) ? 'Re-review PR' : 'Review PR'}
-            disabled={busy}
-            onClick={() => onJob(pr.url, 'review')}
-          >
-            <Sparkles size={14} />
-            <span>{wasReviewed(pr) ? 'Re-review' : 'Review'}</span>
-          </button>
-          <button
-            className="inline-action"
-            title="Address comments"
-            disabled={busy}
-            onClick={() => onJob(pr.url, 'comments')}
-          >
-            <MessageCircle size={14} />
-            <span>Address comments</span>
-          </button>
-          {pr.checkState === 'FAILURE' && (
-            <button
-              className="inline-action"
-              title="Fix failing CI, commit, and push to this PR branch"
-              disabled={busy}
-              onClick={() =>
-                onJob(pr.url, 'ci', undefined, { pushOnCompletion: true })
-              }
-            >
-              <CircleCheck size={14} />
-              <span>Fix CI</span>
-            </button>
-          )}
-          {pr.mergeable === 'CONFLICTING' && (
-            <button
-              className="inline-action"
-              title="Resolve conflicts"
-              disabled={busy}
-              onClick={() => onJob(pr.url, 'conflicts')}
-            >
-              <GitMerge size={14} />
-              <span>Resolve conflicts</span>
-            </button>
-          )}
-        </div>
-      )}
-      <span className="row-time">{age(pr.updatedAt)}</span>
-    </div>
-  );
-}
-function SessionGroups({
-  sessions,
-  projects,
-  worktrees,
-  chat,
-  select,
-  requests,
-  collapsed,
-  setCollapsed,
-}) {
-  const groups = new Map();
-  for (const item of sessions) {
-    const cwd = worktrees[item.cwd] || item.cwd;
-    const match = projects
-      .filter((p) => cwd === p.path || cwd?.startsWith(p.path + '/'))
-      .sort((a, b) => b.path.length - a.path.length)[0];
-    const key = match?.path || cwd || 'other',
-      name = match?.name || cwd?.split('/').filter(Boolean).pop() || 'Other';
-    if (!groups.has(key)) groups.set(key, { name, items: [] });
-    groups.get(key).items.push(item);
-  }
-  const allClosed =
-    groups.size > 0 && [...groups.keys()].every((k) => collapsed[k]);
-  return (
-    <>
-      {groups.size > 1 && (
-        <div className="group-controls">
-          <button
-            className="text-btn"
-            onClick={() =>
-              setCollapsed((prev) => {
-                const next = { ...prev };
-                for (const k of groups.keys()) next[k] = !allClosed;
-                return next;
-              })
-            }
-          >
-            {allClosed ? 'Expand all' : 'Collapse all'}
-          </button>
-        </div>
-      )}
-      {[...groups].map(([key, { name, items }]) => (
-        <section className="session-group" key={key}>
-          <button
-            className="group-title"
-            aria-expanded={!collapsed[key]}
-            onClick={() =>
-              setCollapsed({ ...collapsed, [key]: !collapsed[key] })
-            }
-          >
-            <ChevronRight
-              className={
-                collapsed[key] ? 'group-chevron' : 'group-chevron expanded'
-              }
-              size={13}
-            />
-            <FolderGit2 size={13} />
-            <span className="group-name">{name}</span>
-            <span>{items.length}</span>
-          </button>
-          {!collapsed[key] &&
-            items.map((s) => (
-              <SessionRow
-                key={s.id}
-                s={s}
-                selected={chat === s.id}
-                requests={requests}
-                onClick={() => select(s.id)}
-              />
-            ))}
-        </section>
-      ))}
-    </>
-  );
-}
-function sessionStatus(session, requests = []) {
-  const pending = requests.some((r) => r.params?.threadId === session.id);
-  if (pending) return { label: 'Waiting for your input', type: 'waiting' };
-  const status = session.status || {};
-  if (
-    status.activeFlags?.includes('waitingOnApproval') ||
-    status.activeFlags?.includes('waitingOnUserInput')
-  )
-    return { label: 'Waiting for your input', type: 'waiting' };
-  if (status.type === 'active') return { label: 'Running', type: 'running' };
-  if (status.type === 'systemError') return { label: 'Error', type: 'error' };
-  if (status.type === 'idle') return { label: 'Idle', type: 'idle' };
-  return { label: 'Status unavailable', type: 'unknown' };
-}
-function SessionRow({ s, onClick, selected, requests = [] }) {
-  const st = sessionStatus(s, requests),
-    claude = s.agent === 'claude' || s.id?.startsWith('claude:');
-  return (
-    <button
-      className={'session-row ' + (selected ? 'chosen' : '')}
-      onClick={onClick}
-    >
-      <span
-        className={'agent-icon ' + (claude ? 'claude' : 'codex')}
-        aria-label={claude ? 'Claude Code' : 'Codex'}
-        title={claude ? 'Claude Code' : 'Codex'}
-      >
-        {claude ? '✳' : '✣'}
-      </span>
-      <div className="row-main">
-        <strong>{s.name || s.preview || 'Untitled session'}</strong>
-        <div className="row-meta">
-          <span className={'session-status ' + st.type} aria-hidden="true" />
-          {st.label}
-        </div>
-      </div>
-      <span className="row-time">{age(s.updatedAt)}</span>
-    </button>
   );
 }
 function Empty({ text }) {
@@ -1841,28 +1417,6 @@ function ChatItem({ item, agent = 'Codex' }) {
       </div>
       <div>{text}</div>
     </div>
-  );
-}
-function ChatInput({ send, disabled }) {
-  let [v, V] = useState('');
-  return (
-    <form
-      className="chat-input"
-      onSubmit={async (e) => {
-        e.preventDefault();
-        if (!disabled && v.trim() && (await send(v))) V('');
-      }}
-    >
-      <textarea
-        disabled={disabled}
-        placeholder={disabled ? 'Messaging unavailable' : 'Message an agent...'}
-        value={v}
-        onChange={(e) => V(e.target.value)}
-      />
-      <button className="send" disabled={disabled || !v.trim()}>
-        <Send size={16} />
-      </button>
-    </form>
   );
 }
 function Request({ request, onSubmit }) {

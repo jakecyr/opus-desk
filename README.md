@@ -56,4 +56,4 @@ Then open **http://127.0.0.1:5000**. For a source checkout, use `npm start -- --
 - [How reviewed PRs become releases](docs/releases.md)
 - [Security policy](SECURITY.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [MIT license](LICENSE)
 
-Opus Desk uses your existing CLI authentication and stores its state on your machine. Agents currently default to unrestricted local access; select sandbox mode in Settings if needed. Auto mode is off by default. It prepares local commits and draft reviews; publishing is queued for your approval on Focus. Review [permissions and behavior](docs/usage.md) before starting agents.
+Opus Desk uses your existing CLI authentication and stores its state on your machine. Auto mode starts off. Each action can prepare a draft for your approval or publish to GitHub with your explicit opt-in in Settings. Manual workflows can use the local CLI sandbox or full access. See the [usage guide](docs/usage.md).

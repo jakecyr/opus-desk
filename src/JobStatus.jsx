@@ -1,9 +1,9 @@
 import { LoaderCircle, MessagesSquare } from 'lucide-react';
+import { isJobBusy } from './job-state.js';
 
-export const isJobBusy = (job) =>
-  ['starting', 'running', 'collecting', 'publishing'].includes(job?.status);
+export { isJobBusy };
 
-export function JobStatus({ job, linked }) {
+export function JobStatus({ job, linked, chatLabel = 'Chat' }) {
   const labels = {
     review: 'Reviewing',
     comments: 'Addressing comments',
@@ -45,7 +45,7 @@ export function JobStatus({ job, linked }) {
           title="Open linked chat"
         >
           <MessagesSquare size={14} />
-          <span>Chat</span>
+          <span>{chatLabel}</span>
         </a>
       )}
     </>

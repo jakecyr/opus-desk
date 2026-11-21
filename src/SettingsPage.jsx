@@ -3,6 +3,15 @@ import { ModelPicker, ReasoningPicker } from './ModelPicker.jsx';
 import { createAutosave } from './autosave.js';
 import { SprintSettings } from './Sprint.jsx';
 import { SettingsLayout } from './SettingsLayout.jsx';
+import {
+  autoActionDefaults,
+  getAutoActionMode,
+  getReviewCriteria,
+  reviewCriteria,
+  reviewPresets,
+  validateReviewSettings,
+} from '../server/review-policy.js';
+import './review-settings.css';
 
 const toneHelp = {
   constructive: 'Calm and practical: explain the impact and suggest a fix.',
@@ -11,14 +20,17 @@ const toneHelp = {
   supportive:
     'Friendly and respectful: clearly explain problems without softening what needs fixing.',
 };
-const scopeHelp = {
-  blocking:
-    'Bugs, security risks, breaking changes, and serious design problems that should be fixed before merging.',
-  balanced:
-    'Everything in important fixes, plus actionable improvements to simplicity and maintainability. Cosmetic nits are skipped.',
-  thorough:
-    'Everything in the other two levels, plus a few useful, clearly optional nits. Avoids flooding the PR with minor comments.',
-};
+const workflows = [
+  ['review', 'First review'],
+  ['rereview', 'Re-review'],
+  ['conflicts', 'Resolve conflicts'],
+  ['ci', 'Fix CI'],
+  ['comments', 'Address comments'],
+  ['issue', 'Address issue'],
+  ['describe', 'Write issue description'],
+];
+const modeLabels = { off: 'Off', draft: 'Draft', publish: 'Publish' };
+
 export function SettingsPage({
   settings,
   available,
@@ -60,7 +72,12 @@ export function SettingsPage({
   };
   const set = (key, value) => change({ [key]: value });
   const agent = form.defaultAgent || 'codex',
-    modelKey = agent === 'claude' ? 'claudeModel' : 'codexModel';
+    modelKey = agent === 'claude' ? 'claudeModel' : 'codexModel',
+    criteria = getReviewCriteria(form.reviewCriteria, form.reviewScope),
+    preset =
+      Object.keys(reviewPresets).find(
+        (key) => reviewPresets[key].join() === criteria.join(),
+      ) || 'custom';
   return (
     <>
       <div className="compact-title">
@@ -159,12 +176,12 @@ export function SettingsPage({
             </select>
           </label>
           <label>
-            Agent
+            Provider
             <select
               value={agent}
               onChange={(e) => set('defaultAgent', e.target.value)}
             >
-              <option value="codex">Codex</option>
+              <option value="codex">OpenAI Codex</option>
               <option value="claude" disabled={!available.claude}>
                 Claude Code {available.claude ? '' : '(not found)'}
               </option>
@@ -199,24 +216,28 @@ export function SettingsPage({
           </label>
         </section>
         <section className="panel settings-card">
-          <h2>Workflow overrides</h2>
+          <h2>Workflows</h2>
           <p className="muted">
-            Override the defaults for each task. Linked sessions keep their
-            agent and model.
+            Drafts wait for approval. Publish automatically submits reviews or
+            pushes fixes while Auto mode is running.
           </p>
-          {[
-            ['review', 'Code review'],
-            ['comments', 'Address comments'],
-            ['conflicts', 'Resolve conflicts'],
-            ['ci', 'Fix CI'],
-            ['issue', 'Address issue'],
-            ['describe', 'Write issue description'],
-          ].map(([key, label]) => (
+          {workflows.map(([key, label]) => (
             <WorkflowSetting
               key={key}
               label={label}
               value={form.workflows?.[key] || {}}
+              inherited={
+                key === 'rereview' ? form.workflows?.review : undefined
+              }
               change={(v) => set('workflows', { ...form.workflows, [key]: v })}
+              mode={
+                Object.hasOwn(autoActionDefaults, key)
+                  ? getAutoActionMode(form, key)
+                  : undefined
+              }
+              changeMode={(mode) =>
+                set('autoActions', { ...form.autoActions, [key]: mode })
+              }
               available={available}
               models={models}
               settings={form}
@@ -231,15 +252,6 @@ export function SettingsPage({
         />
         <section className="panel settings-card review-settings">
           <h2>Code reviews</h2>
-          <div className="setting-line">
-            <b>Publishing approval</b>
-            <span className="tag green">Always required</span>
-          </div>
-          <p className="muted">
-            Agents prepare local commits and draft reviews. Review the result on
-            Focus and click Publish to send it to GitHub. Auto mode follows the
-            same rule.
-          </p>
           <div className="form-grid">
             <label>
               Tone
@@ -259,22 +271,48 @@ export function SettingsPage({
             <label>
               Review depth
               <select
-                aria-describedby="review-depth-help"
-                value={form.reviewScope || 'balanced'}
-                onChange={(e) => set('reviewScope', e.target.value)}
+                value={preset}
+                onChange={(e) => {
+                  const selected = e.target.value;
+                  change({
+                    reviewScope: selected,
+                    reviewCriteria: reviewPresets[selected],
+                  });
+                }}
               >
                 <option value="blocking">Important fixes only</option>
                 <option value="balanced">
-                  Important fixes + useful improvements
+                  Important fixes and useful improvements
                 </option>
-                <option value="thorough">
-                  Everything, including useful nits
-                </option>
+                <option value="thorough">Include useful nits</option>
+                {preset === 'custom' && <option value="custom">Custom</option>}
               </select>
-              <small id="review-depth-help" className="hint review-help">
-                {scopeHelp[form.reviewScope || 'balanced']}
-              </small>
             </label>
+            <fieldset className="wide review-criteria">
+              <legend>Check for</legend>
+              {Object.entries(reviewCriteria).map(([key, { label }]) => (
+                <label key={key}>
+                  <input
+                    type="checkbox"
+                    checked={criteria.includes(key)}
+                    onChange={(e) =>
+                      set(
+                        'reviewCriteria',
+                        e.target.checked
+                          ? [...criteria, key]
+                          : criteria.filter((item) => item !== key),
+                      )
+                    }
+                  />
+                  {label}
+                </label>
+              ))}
+            </fieldset>
+            <RelatedRepositories
+              key={(form.reviewRelatedRepos || []).join('\n')}
+              value={(form.reviewRelatedRepos || []).join('\n')}
+              change={(value) => set('reviewRelatedRepos', value)}
+            />
             <label className="wide">
               Additional review preferences
               <textarea
@@ -285,34 +323,98 @@ export function SettingsPage({
               />
             </label>
           </div>
-          <p className="muted">
-            Reviews consider the description, linked issues, discussions, prior
-            feedback, and code. Comments use concise, simple language and
-            suggestions where useful.
-          </p>
         </section>
       </SettingsLayout>
     </>
   );
 }
+
+function RelatedRepositories({ value, change }) {
+  const [error, setError] = useState('');
+  return (
+    <label className="wide">
+      Related repositories
+      <textarea
+        className="review-related-repositories"
+        defaultValue={value}
+        placeholder="owner/repository"
+        onChange={() => setError('')}
+        onBlur={(e) => {
+          const input = e.target.value
+            .trim()
+            .split(/[\s,]+/)
+            .filter(Boolean);
+          if (input.join('\n') === value) return;
+          try {
+            change(
+              validateReviewSettings({ reviewRelatedRepos: input })
+                .reviewRelatedRepos,
+            );
+          } catch (error) {
+            setError(error.message);
+          }
+        }}
+        aria-invalid={!!error}
+        aria-describedby="review-repositories-help"
+      />
+      <small
+        className={error ? 'field-error' : 'hint'}
+        id="review-repositories-help"
+      >
+        {error ||
+          'Add repositories with related dependencies or shared interfaces, one per line.'}
+      </small>
+    </label>
+  );
+}
+
 function WorkflowSetting({
   label,
   value,
+  inherited,
   change,
+  mode,
+  changeMode,
   available,
   models,
   settings,
 }) {
-  const agent = value.agent || settings.defaultAgent || 'codex',
+  const config = { ...inherited, ...value };
+  const agent = config.agent || settings.defaultAgent || 'codex',
     model =
-      value.model ||
+      config.model ||
       (agent === 'claude' ? settings.claudeModel : settings.codexModel);
   return (
     <details className="workflow">
-      <summary>{label}</summary>
+      <summary>
+        {label}
+        {mode && (
+          <span
+            className={
+              'workflow-mode tag ' + (mode === 'publish' ? 'green' : '')
+            }
+          >
+            {modeLabels[mode]}
+          </span>
+        )}
+      </summary>
       <div className="form-grid">
+        {mode && (
+          <label>
+            Auto mode
+            <select
+              value={mode}
+              onChange={(e) => changeMode(e.target.value)}
+              aria-label={label + ' Auto mode'}
+            >
+              <option value="off">Off</option>
+              <option value="draft">Draft · wait for approval</option>
+              <option value="publish">Publish to GitHub automatically</option>
+            </select>
+          </label>
+        )}
         <label>
-          Agent
+          Provider
           <select
             value={value.agent || ''}
             onChange={(e) =>
@@ -320,7 +422,7 @@ function WorkflowSetting({
             }
           >
             <option value="">Default</option>
-            <option value="codex">Codex</option>
+            <option value="codex">OpenAI Codex</option>
             <option value="claude" disabled={!available.claude}>
               Claude Code
             </option>
@@ -343,7 +445,7 @@ function WorkflowSetting({
           emptyLabel="Default"
         />
         <label>
-          Permissions
+          Manual permissions
           <select
             value={value.permission || ''}
             onChange={(e) => change({ ...value, permission: e.target.value })}

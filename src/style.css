@@ -1671,14 +1671,6 @@ main {
 .session-toolbar .search {
   min-width: 0;
 }
-.group-controls {
-  display: flex;
-  justify-content: flex-end;
-  padding: 6px 12px 2px;
-}
-.group-controls .text-btn {
-  font-size: 10px;
-}
 .group-title {
   width: 100%;
   border: 0;
@@ -1882,38 +1874,6 @@ main {
     font-size: 10px;
   }
 }
-/* Pull request board */
-.pr-page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
-  min-height: 34px;
-}
-.pr-page-head h1 {
-  font-size: 23px;
-  letter-spacing: -0.6px;
-  margin: 0;
-}
-.review-options {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.review-options label {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #969caf;
-  font-size: 11px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-.review-options select {
-  padding: 7px;
-  font-size: 11px;
-}
 .filter-pills {
   display: flex;
   gap: 6px;
@@ -1934,92 +1894,12 @@ main {
   border-color: #c8c1fb;
   color: #574acb;
 }
-.pr-board {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
-  gap: 12px;
-  align-items: start;
-}
-.pr-lane {
-  min-width: 0;
-  background: #edeff5;
-  border: 1px solid #e1e4ed;
-  border-radius: 10px;
-  padding: 10px;
-}
-.lane-heading {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 3px 3px 10px;
-  color: #596077;
-  font-size: 12px;
-}
-.lane-heading span {
-  font-size: 10px;
-  padding: 3px 7px;
-  border-radius: 5px;
-  background: #e0e3ec;
-  color: #777d90;
-}
-.lane-cards {
-  display: grid;
-  gap: 8px;
-}
-.pr-lane .pr-row {
-  border: 1px solid #e3e6ee;
-  border-radius: 8px;
-  align-items: flex-start;
-  gap: 8px;
-  overflow: hidden;
-}
-.pr-lane .row-main-button {
-  flex: 1 1 calc(100% - 40px);
-  min-width: 0;
-}
-.pr-lane .row-main strong {
-  white-space: normal;
-  overflow-wrap: anywhere;
-  line-height: 1.35;
-}
-.pr-lane .inline-actions {
-  flex: 1 1 100%;
-  padding: 0;
-  gap: 4px;
-}
-.pr-lane .inline-action {
-  font-size: 10px;
-}
-.pr-lane .row-time {
-  margin-left: auto;
-}
-.lane-empty {
-  text-align: center;
-  padding: 20px 4px;
-  color: #a4aab9;
-  font-size: 11px;
-}
 .external-warning {
   padding: 9px 14px;
   color: #8a5e11;
   background: #fff6de;
   border-top: 1px solid #f4dfaa;
   font-size: 12px;
-}
-:root[data-theme='dark'] .pr-lane {
-  background: #10131c;
-  border-color: #282c39;
-}
-:root[data-theme='dark'] .pr-lane .pr-row {
-  background: #1a1e29;
-  border-color: #303545;
-}
-:root[data-theme='dark'] .lane-heading {
-  color: #c2c7d7;
-}
-:root[data-theme='dark'] .lane-heading span {
-  background: #303445;
-  color: #bbc0d0;
 }
 :root[data-theme='dark'] .filter-pills button {
   background: #1a1d29;
@@ -2035,18 +1915,6 @@ main {
   background: #3b3020;
   border-color: #6a542f;
   color: #f2d39b;
-}
-@media (max-width: 700px) {
-  .pr-page-head {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-  .review-options {
-    flex-wrap: wrap;
-  }
-  .pr-board {
-    grid-template-columns: 1fr;
-  }
 }
 .chat-input:has(textarea:disabled) {
   opacity: 0.62;
