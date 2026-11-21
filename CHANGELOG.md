@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/jakecyr/opus-desk/compare/v0.4.0...v0.5.0) (2026-11-21)
+
+
+### Features
+
+* add GitHub review automation and chat orchestration ([#24](https://github.com/jakecyr/opus-desk/issues/24)) ([a0e6cb8](https://github.com/jakecyr/opus-desk/commit/a0e6cb81db590a39d8196479e8cb7a9b4ba398df))
+
 ## [0.4.0](https://github.com/jakecyr/opus-desk/compare/v0.3.0...v0.4.0) (2026-11-06)
 
 
